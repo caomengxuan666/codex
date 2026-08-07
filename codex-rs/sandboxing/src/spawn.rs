@@ -70,6 +70,7 @@ pub async fn spawn_process(request: SpawnRequest<'_>) -> Result<SpawnedProcess> 
                         .and_then(|value| value.read_roots_override.as_deref()),
                     read_roots_include_platform_defaults: overrides
                         .is_some_and(|value| value.read_roots_include_platform_defaults),
+                    additional_read_roots: &[],
                     write_roots_override: overrides
                         .and_then(|value| value.write_roots_override.as_deref()),
                     deny_read_paths_override: overrides.map_or(empty_paths, |value| {

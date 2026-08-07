@@ -289,6 +289,7 @@ fn elevated_non_tty_cmd_forwards_env_output_and_exit() {
             Some(5_000),
             /*read_roots_override*/ None,
             /*read_roots_include_platform_defaults*/ true,
+            /*additional_read_roots*/ &[],
             /*write_roots_override*/ None,
             &[],
             &[],

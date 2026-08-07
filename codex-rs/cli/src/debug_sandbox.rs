@@ -495,6 +495,7 @@ async fn run_command_under_windows_session(
         timeout_ms: None,
         read_roots_override: None,
         read_roots_include_platform_defaults: false,
+        additional_read_roots: &[],
         write_roots_override: None,
         deny_read_paths_override: empty_paths,
         deny_write_paths_override: empty_paths,

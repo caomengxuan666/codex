@@ -573,6 +573,19 @@ fn transform_for_direct_spawn_windows_materializes_inner_helper() {
             .iter()
             .any(|arg| arg == "--deny-read-paths-json")
     );
+    let additional_read_roots_json = exec_request
+        .command
+        .windows(2)
+        .find_map(|args| (args[0] == "--additional-read-roots-json").then_some(&args[1]))
+        .expect("additional read roots");
+    let additional_read_roots =
+        serde_json::from_str::<Vec<std::path::PathBuf>>(additional_read_roots_json)
+            .expect("parse additional read roots");
+    assert!(
+        additional_read_roots
+            .iter()
+            .any(|root| root == helper_dir.path())
+    );
     assert_eq!(
         exec_request.command[separator_index + 2],
         "--codex-run-as-fs-helper"

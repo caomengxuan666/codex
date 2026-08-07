@@ -1,0 +1,89 @@
+name: winuxsh-codex-windows-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_name:
+        description: "Artifact name"
+        required: false
+        default: "winuxsh-codex-preview-windows-x86_64"
+      release_tag:
+        description: "Optional GitHub release tag to upload the zip to"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Windows x64 preview
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            codex-rs/target
+          key: cargo-windows-x64-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: cargo-windows-x64-
+
+      - name: Build sandbox helpers
+        shell: pwsh
+        run: cargo build --target x86_64-pc-windows-msvc --release --package codex-windows-sandbox --bins
+
+      - name: Build Codex CLI
+        shell: pwsh
+        run: cargo build --target x86_64-pc-windows-msvc --release --package codex-cli --bin codex
+
+      - name: Stage zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $artifactName = "${{ inputs.artifact_name }}"
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "codex-rs\target\x86_64-pc-windows-msvc\release"
+          $stageRoot = Join-Path $env:RUNNER_TEMP $artifactName
+          $stageDir = Join-Path $stageRoot $artifactName
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+
+          Copy-Item (Join-Path $releaseDir "codex.exe") $stageDir
+          Copy-Item (Join-Path $releaseDir "codex-command-runner.exe") $stageDir
+          Copy-Item (Join-Path $releaseDir "codex-windows-sandbox-setup.exe") $stageDir
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "README.md") $stageDir
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "RELEASE.md") $stageDir
+
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE "$artifactName.zip"
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+          Compress-Archive -Path $stageDir -DestinationPath $zipPath -CompressionLevel Optimal
+          "ZIP_PATH=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+
+      - name: Upload release asset
+        if: ${{ inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
+          prerelease: true
+          files: ${{ env.ZIP_PATH }}

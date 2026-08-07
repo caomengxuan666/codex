@@ -8,6 +8,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 
+use super::ADDITIONAL_READ_ROOTS_JSON_FLAG;
 use super::CODEX_HOME_FLAG;
 use super::CODEX_WINDOWS_SANDBOX_ARG1;
 use super::COMMAND_CWD_FLAG;
@@ -41,6 +42,7 @@ fn windows_wrapper_args_round_trip() {
         network: NetworkSandboxPolicy::Restricted,
     };
     let read_roots_override = vec![PathBuf::from(r"C:\read")];
+    let additional_read_roots = vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\winuxsh")];
     let write_roots_override = vec![PathBuf::from(r"C:\write")];
     let deny_read_paths_override = vec![
         AbsolutePathBuf::from_absolute_path(Path::new(r"C:\blocked-read"))
@@ -67,6 +69,7 @@ fn windows_wrapper_args_round_trip() {
         crate::WindowsSandboxProxySettingsMode::Preserve,
         Some(read_roots_override.as_slice()),
         /*read_roots_include_platform_defaults*/ true,
+        additional_read_roots.as_slice(),
         Some(write_roots_override.as_slice()),
         deny_read_paths_override.as_slice(),
         deny_write_paths_override.as_slice(),
@@ -86,6 +89,7 @@ fn windows_wrapper_args_round_trip() {
     assert!(args.contains(&PRESERVE_PROXY_SETTINGS_FLAG.to_string()));
     assert!(args.contains(&READ_ROOTS_JSON_FLAG.to_string()));
     assert!(args.contains(&READ_ROOTS_INCLUDE_PLATFORM_DEFAULTS_FLAG.to_string()));
+    assert!(args.contains(&ADDITIONAL_READ_ROOTS_JSON_FLAG.to_string()));
     assert!(args.contains(&WRITE_ROOTS_JSON_FLAG.to_string()));
     assert!(args.contains(&DENY_READ_PATHS_JSON_FLAG.to_string()));
     assert!(args.contains(&DENY_WRITE_PATHS_JSON_FLAG.to_string()));
@@ -114,6 +118,7 @@ fn windows_wrapper_args_round_trip() {
     );
     assert_eq!(parsed.read_roots_override, Some(read_roots_override));
     assert_eq!(parsed.read_roots_include_platform_defaults, true);
+    assert_eq!(parsed.additional_read_roots, additional_read_roots);
     assert_eq!(parsed.write_roots_override, Some(write_roots_override));
     assert_eq!(parsed.deny_read_paths_override, deny_read_paths_override);
     assert_eq!(parsed.deny_write_paths_override, deny_write_paths_override);

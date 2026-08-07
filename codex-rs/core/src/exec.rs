@@ -696,6 +696,7 @@ async fn exec_windows_sandbox(
                     read_roots_override: elevated_read_roots_override.as_deref(),
                     read_roots_include_platform_defaults:
                         elevated_read_roots_include_platform_defaults,
+                    additional_read_roots: &[],
                     write_roots_override: elevated_write_roots_override.as_deref(),
                     deny_read_paths_override: &additional_deny_read_paths,
                     deny_write_paths_override: &additional_deny_write_paths,

@@ -354,6 +354,7 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
     command: &[String],
     read_roots_override: Option<&[PathBuf]>,
     read_roots_include_platform_defaults: bool,
+    additional_read_roots: &[PathBuf],
     write_roots_override: Option<&[PathBuf]>,
     deny_read_paths_override: &[PathBuf],
     deny_write_paths_override: &[PathBuf],
@@ -406,6 +407,7 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
         codex_home,
         read_roots_override,
         read_roots_include_platform_defaults,
+        additional_read_roots,
         setup_write_roots_override,
         deny_read_paths_override,
         if deny_write_paths_override.is_empty() {

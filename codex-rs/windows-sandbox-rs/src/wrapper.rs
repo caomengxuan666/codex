@@ -21,6 +21,7 @@ pub const CODEX_WINDOWS_SANDBOX_ARG1: &str = "--run-as-windows-sandbox";
 
 const COMMAND_CWD_FLAG: &str = "--command-cwd";
 const CODEX_HOME_FLAG: &str = "--codex-home";
+const ADDITIONAL_READ_ROOTS_JSON_FLAG: &str = "--additional-read-roots-json";
 const DENY_READ_PATHS_JSON_FLAG: &str = "--deny-read-paths-json";
 const DENY_WRITE_PATHS_JSON_FLAG: &str = "--deny-write-paths-json";
 const ENV_JSON_FLAG: &str = "--env-json";
@@ -49,6 +50,7 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
     read_roots_override: Option<&[PathBuf]>,
     read_roots_include_platform_defaults: bool,
+    additional_read_roots: &[PathBuf],
     write_roots_override: Option<&[PathBuf]>,
     deny_read_paths_override: &[AbsolutePathBuf],
     deny_write_paths_override: &[AbsolutePathBuf],
@@ -98,6 +100,13 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
     }
     if read_roots_include_platform_defaults {
         args.push(READ_ROOTS_INCLUDE_PLATFORM_DEFAULTS_FLAG.to_string());
+    }
+    if !additional_read_roots.is_empty() {
+        push_json_arg(
+            &mut args,
+            ADDITIONAL_READ_ROOTS_JSON_FLAG,
+            &additional_read_roots,
+        );
     }
     if let Some(write_roots_override) = write_roots_override {
         push_json_arg(&mut args, WRITE_ROOTS_JSON_FLAG, &write_roots_override);
@@ -169,6 +178,7 @@ struct WindowsSandboxWrapperRequest {
     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
     read_roots_override: Option<Vec<PathBuf>>,
     read_roots_include_platform_defaults: bool,
+    additional_read_roots: Vec<PathBuf>,
     write_roots_override: Option<Vec<PathBuf>>,
     deny_read_paths_override: Vec<AbsolutePathBuf>,
     deny_write_paths_override: Vec<AbsolutePathBuf>,
@@ -194,6 +204,7 @@ async fn run_windows_sandbox_wrapper_request(request: WindowsSandboxWrapperReque
             timeout_ms: None,
             read_roots_override: request.read_roots_override.as_deref(),
             read_roots_include_platform_defaults: request.read_roots_include_platform_defaults,
+            additional_read_roots: request.additional_read_roots.as_slice(),
             write_roots_override: request.write_roots_override.as_deref(),
             deny_read_paths_override: request.deny_read_paths_override.as_slice(),
             deny_write_paths_override: request.deny_write_paths_override.as_slice(),
@@ -220,6 +231,7 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
     let mut proxy_settings_mode = crate::WindowsSandboxProxySettingsMode::Reconcile;
     let mut read_roots_override = None;
     let mut read_roots_include_platform_defaults = false;
+    let mut additional_read_roots = Vec::new();
     let mut write_roots_override = None;
     let mut deny_read_paths_override = Vec::new();
     let mut deny_write_paths_override = Vec::new();
@@ -271,6 +283,9 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
                 read_roots_override =
                     Some(json_flag_value(next_flag_value(&mut args, &arg)?, &arg)?);
             }
+            ADDITIONAL_READ_ROOTS_JSON_FLAG => {
+                additional_read_roots = json_flag_value(next_flag_value(&mut args, &arg)?, &arg)?;
+            }
             WRITE_ROOTS_JSON_FLAG => {
                 write_roots_override =
                     Some(json_flag_value(next_flag_value(&mut args, &arg)?, &arg)?);
@@ -309,6 +324,7 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
         proxy_settings_mode,
         read_roots_override,
         read_roots_include_platform_defaults,
+        additional_read_roots,
         write_roots_override,
         deny_read_paths_override,
         deny_write_paths_override,
