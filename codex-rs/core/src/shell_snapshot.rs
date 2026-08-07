@@ -46,6 +46,13 @@ const SNAPSHOT_RETENTION: Duration = Duration::from_secs(60 * 60 * 24 * 3); // 3
 const SNAPSHOT_DIR: &str = "shell_snapshots";
 const EXCLUDED_EXPORT_VARS: &[&str] = &["PWD", "OLDPWD"];
 
+fn shell_snapshot_supported(shell_type: ShellType) -> bool {
+    !matches!(
+        shell_type,
+        ShellType::PowerShell | ShellType::Cmd | ShellType::Winuxsh
+    )
+}
+
 impl ShellSnapshot {
     pub(crate) fn new(
         codex_home: AbsolutePathBuf,
@@ -79,6 +86,10 @@ impl ShellSnapshot {
         }
 
         let shell = shell?;
+        if !shell_snapshot_supported(shell.shell_type) {
+            return None;
+        }
+
         // TODO(anp): Migrate shell snapshot creation to accept PathUri and defer native
         // conversion to the spawned shell process.
         let cwd = cwd.to_abs_path().ok()?;
@@ -203,7 +214,7 @@ async fn write_shell_snapshot(
     output_path: &AbsolutePathBuf,
     cwd: &AbsolutePathBuf,
 ) -> Result<()> {
-    if shell_type == ShellType::PowerShell || shell_type == ShellType::Cmd {
+    if !shell_snapshot_supported(shell_type) {
         bail!("Shell snapshot not supported yet for {shell_type:?}");
     }
     let shell = get_shell(shell_type, /*path*/ None)
@@ -233,6 +244,7 @@ async fn capture_snapshot(shell: &Shell, cwd: &AbsolutePathBuf) -> Result<String
         ShellType::Zsh => run_shell_script(shell, &zsh_snapshot_script(), cwd).await,
         ShellType::Bash => run_shell_script(shell, &bash_snapshot_script(), cwd).await,
         ShellType::Sh => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
+        ShellType::Winuxsh => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
         ShellType::PowerShell => run_shell_script(shell, powershell_snapshot_script(), cwd).await,
         ShellType::Cmd => bail!("Shell snapshotting is not yet supported for {shell_type:?}"),
     }

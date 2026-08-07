@@ -54,6 +54,25 @@ fn canonicalizes_heredoc_scripts_to_stable_script_key() {
 }
 
 #[test]
+fn canonicalizes_winuxsh_scripts_like_other_bash_like_shells() {
+    let command = vec![
+        "winuxsh.exe".to_string(),
+        "-C".to_string(),
+        "cargo test -p codex-core".to_string(),
+    ];
+
+    assert_eq!(
+        canonicalize_command_for_approval(&command),
+        vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "codex-core".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn canonicalizes_powershell_wrappers_to_stable_script_key() {
     let script = "Write-Host hi";
     let command_a = vec![

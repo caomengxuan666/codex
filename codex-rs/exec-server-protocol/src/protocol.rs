@@ -149,7 +149,7 @@ impl EnvironmentInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellInfo {
-    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, or `cmd`.
+    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, `cmd`, or `winuxsh`.
     pub name: String,
     /// Target-native shell executable path or command name. Fallbacks such as `cmd.exe` need not
     /// be absolute, so this is not a [`PathUri`].

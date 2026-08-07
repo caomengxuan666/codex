@@ -141,6 +141,19 @@ fn derive_exec_args() {
         test_powershell_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
         vec!["pwsh.exe", "-Command", "echo hello"]
     );
+
+    let test_winuxsh_shell = Shell {
+        shell_type: ShellType::Winuxsh,
+        shell_path: PathBuf::from("winuxsh.exe"),
+    };
+    assert_eq!(
+        test_winuxsh_shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
+        vec!["winuxsh.exe", "-c", "echo hello"]
+    );
+    assert_eq!(
+        test_winuxsh_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
+        vec!["winuxsh.exe", "-C", "echo hello"]
+    );
 }
 
 #[tokio::test]

@@ -102,6 +102,16 @@ fn strip_snapshot_preamble_requires_marker() {
 }
 
 #[test]
+fn shell_snapshot_support_excludes_non_replayable_shells() {
+    assert!(shell_snapshot_supported(ShellType::Bash));
+    assert!(shell_snapshot_supported(ShellType::Zsh));
+    assert!(shell_snapshot_supported(ShellType::Sh));
+    assert!(!shell_snapshot_supported(ShellType::PowerShell));
+    assert!(!shell_snapshot_supported(ShellType::Cmd));
+    assert!(!shell_snapshot_supported(ShellType::Winuxsh));
+}
+
+#[test]
 fn snapshot_file_name_parser_supports_legacy_and_suffixed_names() {
     let session_id = "019cf82b-6a62-7700-bbbd-46909794ef89";
 

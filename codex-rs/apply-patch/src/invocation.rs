@@ -62,6 +62,7 @@ fn classify_shell_name(shell: &str, convention: PathConvention) -> Option<String
 fn classify_shell(shell: &str, flag: &str, convention: PathConvention) -> Option<ApplyPatchShell> {
     classify_shell_name(shell, convention).and_then(|name| match name.as_str() {
         "bash" | "zsh" | "sh" if matches!(flag, "-lc" | "-c") => Some(ApplyPatchShell::Unix),
+        "winuxsh" if matches!(flag, "-C" | "--repl-command" | "-c") => Some(ApplyPatchShell::Unix),
         "pwsh" | "powershell" if flag.eq_ignore_ascii_case("-command") => {
             Some(ApplyPatchShell::PowerShell)
         }
@@ -416,6 +417,10 @@ mod tests {
         strs_to_strings(&["bash", "-lc", script])
     }
 
+    fn args_winuxsh(script: &str) -> Vec<String> {
+        strs_to_strings(&["winuxsh.exe", "-C", script])
+    }
+
     fn args_powershell(script: &str) -> Vec<String> {
         strs_to_strings(&["powershell.exe", "-Command", script])
     }
@@ -592,6 +597,12 @@ mod tests {
         let script = heredoc_script("");
         let args = strs_to_strings(&["bash", "-c", &script]);
         assert_match_args(args, /*expected_workdir*/ None);
+    }
+
+    #[tokio::test]
+    async fn test_winuxsh_heredoc() {
+        let script = heredoc_script("cd foo && ");
+        assert_match_args(args_winuxsh(&script), Some("foo"));
     }
 
     #[tokio::test]

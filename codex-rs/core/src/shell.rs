@@ -29,6 +29,14 @@ impl Shell {
                     command.to_string(),
                 ]
             }
+            ShellType::Winuxsh => {
+                let arg = if use_login_shell { "-C" } else { "-c" };
+                vec![
+                    self.shell_path.to_string_lossy().to_string(),
+                    arg.to_string(),
+                    command.to_string(),
+                ]
+            }
             ShellType::PowerShell => {
                 let mut args = vec![self.shell_path.to_string_lossy().to_string()];
                 if !use_login_shell {
@@ -66,6 +74,7 @@ impl Shell {
             "powershell" => ShellType::PowerShell,
             "sh" => ShellType::Sh,
             "cmd" => ShellType::Cmd,
+            "winuxsh" => ShellType::Winuxsh,
             name => anyhow::bail!("unknown environment shell `{name}`"),
         };
 
@@ -91,6 +100,28 @@ pub fn get_shell(shell_type: ShellType, path: Option<&PathBuf>) -> Option<Shell>
 
 pub fn default_user_shell() -> Shell {
     codex_shell_command::shell_detect::default_user_shell().into()
+}
+
+#[cfg(test)]
+mod platform_independent_tests {
+    use super::*;
+
+    #[test]
+    fn winuxsh_uses_profile_and_no_profile_exec_args() {
+        let shell = Shell {
+            shell_type: ShellType::Winuxsh,
+            shell_path: PathBuf::from("winuxsh.exe"),
+        };
+
+        assert_eq!(
+            shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
+            vec!["winuxsh.exe", "-c", "echo hello"]
+        );
+        assert_eq!(
+            shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
+            vec!["winuxsh.exe", "-C", "echo hello"]
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

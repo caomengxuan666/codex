@@ -33,6 +33,7 @@ pub enum ToolUserShellType {
     PowerShell,
     Sh,
     Cmd,
+    Winuxsh,
 }
 
 pub fn request_user_input_available_modes(features: &Features) -> Vec<ModeKind> {

@@ -210,7 +210,7 @@ fn shell_command_tool_matches_expected_spec() {
     });
 
     let description = if cfg!(windows) {
-        r#"Runs a Powershell command (Windows) and returns its output.
+        r#"Runs a command in the user's default Windows shell and returns its output.
 
 Examples of valid command strings:
 

@@ -10,6 +10,7 @@ pub enum ShellType {
     PowerShell,
     Sh,
     Cmd,
+    Winuxsh,
 }
 
 impl ShellType {
@@ -20,6 +21,7 @@ impl ShellType {
             Self::PowerShell => "powershell",
             Self::Sh => "sh",
             Self::Cmd => "cmd",
+            Self::Winuxsh => "winuxsh",
         }
     }
 }
@@ -45,6 +47,7 @@ pub fn detect_shell_type(shell_path: impl AsRef<std::path::Path>) -> Option<Shel
         Some("bash") => Some(ShellType::Bash),
         Some("pwsh") => Some(ShellType::PowerShell),
         Some("powershell") => Some(ShellType::PowerShell),
+        Some("winuxsh") => Some(ShellType::Winuxsh),
         _ => {
             let shell_name = shell_path.file_stem();
             if let Some(shell_name) = shell_name {
@@ -238,6 +241,40 @@ fn get_cmd_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
     })
 }
 
+#[cfg(windows)]
+const WINUXSH_FALLBACK_PATHS: &[&str] = &[
+    r#"C:\Program Files\Winuxsh\winuxsh.exe"#,
+    r#"C:\Program Files (x86)\Winuxsh\winuxsh.exe"#,
+];
+
+#[cfg(windows)]
+fn get_local_app_data_winuxsh_shell_path() -> Option<PathBuf> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+    file_exists(
+        std::path::Path::new(&local_app_data)
+            .join("Programs")
+            .join("Winuxsh")
+            .join("winuxsh.exe")
+            .as_path(),
+    )
+}
+
+#[cfg(windows)]
+fn get_winuxsh_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
+    let shell_path = get_shell_path(ShellType::Winuxsh, path, "winuxsh", WINUXSH_FALLBACK_PATHS)
+        .or_else(get_local_app_data_winuxsh_shell_path);
+
+    shell_path.map(|shell_path| DetectedShell {
+        shell_type: ShellType::Winuxsh,
+        shell_path,
+    })
+}
+
+#[cfg(not(windows))]
+fn get_winuxsh_shell(_path: Option<&PathBuf>) -> Option<DetectedShell> {
+    None
+}
+
 pub fn ultimate_fallback_shell() -> DetectedShell {
     if cfg!(windows) {
         DetectedShell {
@@ -265,6 +302,7 @@ pub fn get_shell(shell_type: ShellType, path: Option<&PathBuf>) -> Option<Detect
         ShellType::PowerShell => get_powershell_shell(path),
         ShellType::Sh => get_sh_shell(path),
         ShellType::Cmd => get_cmd_shell(path),
+        ShellType::Winuxsh => get_winuxsh_shell(path),
     }
 }
 
@@ -274,7 +312,14 @@ pub fn default_user_shell() -> DetectedShell {
 
 pub fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> DetectedShell {
     if cfg!(windows) {
-        get_shell(ShellType::PowerShell, /*path*/ None).unwrap_or_else(ultimate_fallback_shell)
+        let user_default_shell = user_shell_path
+            .and_then(|shell| detect_shell_type(&shell))
+            .and_then(|shell_type| get_shell(shell_type, /*path*/ None));
+
+        user_default_shell
+            .or_else(|| get_shell(ShellType::Winuxsh, /*path*/ None))
+            .or_else(|| get_shell(ShellType::PowerShell, /*path*/ None))
+            .unwrap_or_else(ultimate_fallback_shell)
     } else {
         let user_default_shell = user_shell_path
             .and_then(|shell| detect_shell_type(&shell))
@@ -316,6 +361,14 @@ mod tests {
         assert_eq!(
             detect_shell_type(PathBuf::from("powershell")),
             Some(ShellType::PowerShell)
+        );
+        assert_eq!(
+            detect_shell_type(PathBuf::from("winuxsh")),
+            Some(ShellType::Winuxsh)
+        );
+        assert_eq!(
+            detect_shell_type(PathBuf::from("winuxsh.exe")),
+            Some(ShellType::Winuxsh)
         );
         assert_eq!(detect_shell_type(PathBuf::from("fish")), None);
         assert_eq!(detect_shell_type(PathBuf::from("other")), None);
@@ -364,5 +417,22 @@ mod tests {
             detect_shell_type(PathBuf::from("cmd.exe")),
             Some(ShellType::Cmd)
         );
+        assert_eq!(
+            detect_shell_type(PathBuf::from(if cfg!(windows) {
+                r"C:\Users\example\AppData\Local\Programs\Winuxsh\winuxsh.exe"
+            } else {
+                "/usr/local/bin/winuxsh"
+            })),
+            Some(ShellType::Winuxsh)
+        );
+    }
+
+    #[test]
+    fn windows_default_user_shell_prefers_winuxsh_when_available() {
+        if !cfg!(windows) || get_shell(ShellType::Winuxsh, /*path*/ None).is_none() {
+            return;
+        }
+
+        assert_eq!(default_user_shell().shell_type, ShellType::Winuxsh);
     }
 }

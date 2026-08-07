@@ -104,12 +104,15 @@ pub fn extract_bash_command(command: &[String]) -> Option<(&str, &str)> {
     let [shell, flag, script] = command else {
         return None;
     };
-    if !matches!(flag.as_str(), "-lc" | "-c")
-        || !matches!(
-            detect_shell_type(PathBuf::from(shell)),
-            Some(ShellType::Zsh) | Some(ShellType::Bash) | Some(ShellType::Sh)
-        )
-    {
+    let shell_type = detect_shell_type(PathBuf::from(shell));
+    let valid_shell_flag = match shell_type {
+        Some(ShellType::Zsh | ShellType::Bash | ShellType::Sh) => {
+            matches!(flag.as_str(), "-lc" | "-c")
+        }
+        Some(ShellType::Winuxsh) => matches!(flag.as_str(), "-C" | "--repl-command" | "-c"),
+        _ => false,
+    };
+    if !valid_shell_flag {
         return None;
     }
     Some((shell, script))
@@ -531,6 +534,23 @@ mod tests {
         let command = vec!["zsh".to_string(), "-lc".to_string(), "ls".to_string()];
         let parsed = parse_shell_lc_plain_commands(&command).unwrap();
         assert_eq!(parsed, vec![vec!["ls".to_string()]]);
+    }
+
+    #[test]
+    fn parse_winuxsh_repl_command_plain_commands() {
+        for flag in ["-C", "--repl-command"] {
+            let command = vec![
+                "winuxsh".to_string(),
+                flag.to_string(),
+                "git status".to_string(),
+            ];
+            let parsed = parse_shell_lc_plain_commands(&command).unwrap();
+            assert_eq!(
+                parsed,
+                vec![vec!["git".to_string(), "status".to_string()]],
+                "{flag}"
+            );
+        }
     }
 
     #[test]

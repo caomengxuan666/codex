@@ -138,6 +138,16 @@ pub(crate) static BANNED_PREFIX_SUGGESTIONS: &[&[&str]] = &[
     &["zsh"],
     &["zsh", "-c"],
     &["zsh", "-lc"],
+    &["winuxsh"],
+    &["winuxsh", "-C"],
+    &["winuxsh", "-c"],
+    &["winuxsh", "-lc"],
+    &["winuxsh", "--repl-command"],
+    &["winuxsh.exe"],
+    &["winuxsh.exe", "-C"],
+    &["winuxsh.exe", "-c"],
+    &["winuxsh.exe", "-lc"],
+    &["winuxsh.exe", "--repl-command"],
 ];
 
 /// Describes which unmatched-command heuristics should classify the command

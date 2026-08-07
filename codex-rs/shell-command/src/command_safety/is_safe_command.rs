@@ -537,6 +537,20 @@ mod tests {
     }
 
     #[test]
+    fn winuxsh_repl_command_safe_command_sequence() {
+        assert!(is_known_safe_command(&vec_str(&[
+            "winuxsh",
+            "-C",
+            "git status",
+        ])));
+        assert!(!is_known_safe_command(&vec_str(&[
+            "winuxsh",
+            "-C",
+            "ls && rm -rf /",
+        ])));
+    }
+
+    #[test]
     fn unknown_or_partial() {
         assert!(!is_safe_to_call_with_exec(&vec_str(&["foo"])));
         assert!(!is_safe_to_call_with_exec(&vec_str(&["git", "fetch"])));
