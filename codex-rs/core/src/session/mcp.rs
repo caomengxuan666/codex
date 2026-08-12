@@ -1,5 +1,6 @@
 use super::mcp_refresh::McpRefreshInvalidationGuard;
 use super::*;
+use crate::tools::sandboxing::executor_windows_sandbox_level;
 use codex_exec_server::ExecutorCapabilityDiscoveryCache;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_exec_server::FileSystemSandboxContext;
@@ -386,7 +387,8 @@ impl Session {
                         environment.cwd().clone(),
                     );
                     sandbox.workspace_roots = environment.workspace_roots().to_vec();
-                    sandbox.windows_sandbox_level = windows_sandbox_level;
+                    sandbox.windows_sandbox_level =
+                        executor_windows_sandbox_level(windows_sandbox_level, environment.cwd());
                     sandbox.windows_sandbox_private_desktop =
                         config.permissions.windows_sandbox_private_desktop;
                     sandbox.use_legacy_landlock = config.features.use_legacy_landlock();
@@ -440,11 +442,13 @@ impl Session {
             .selected_capability_roots
             .iter()
             .cloned()
-            .chain(
-                environments
-                    .turn_environments()
-                    .flat_map(|environment| environment.environment.selected_capability_roots()),
-            )
+            .chain(environments.turn_environments().flat_map(|environment| {
+                environment
+                    .config
+                    .selected_capability_roots
+                    .clone()
+                    .unwrap_or_else(|| environment.environment.selected_capability_roots())
+            }))
             .enumerate()
         {
             if let Some(kept_location) = root_locations_by_id.get(&root.id) {
@@ -752,6 +756,7 @@ async fn review_guardian_mcp_elicitation(
             || crate::connectors::mcp_approvals_reviewer_from_layers(
                 &mcp_config.config_layer_stack,
                 ApprovalsReviewer::AutoReview,
+                Some(turn_context.model_info.slug.as_str()),
                 request.server_name.as_str(),
                 connector_id,
             ) != ApprovalsReviewer::AutoReview
@@ -821,6 +826,7 @@ async fn review_guardian_mcp_elicitation(
     let approvals_reviewer = crate::connectors::mcp_approvals_reviewer_from_layers(
         &mcp_config.config_layer_stack,
         mcp_config.approvals_reviewer,
+        Some(turn_context.model_info.slug.as_str()),
         request.server_name.as_str(),
         elicitation_connector_id(&request.elicitation),
     );
@@ -1007,6 +1013,7 @@ fn mcp_elicitation_response_from_guardian_decision(
     match decision {
         ReviewDecision::Approved
         | ReviewDecision::ApprovedForSession
+        | ReviewDecision::ApprovedMcpPolicyAmendment
         | ReviewDecision::ApprovedExecpolicyAmendment { .. }
         | ReviewDecision::NetworkPolicyAmendment { .. } => ElicitationResponse {
             action: ElicitationAction::Accept,

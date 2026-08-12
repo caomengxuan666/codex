@@ -7,6 +7,8 @@ use codex_core::config::CurrentTimeReminderConfig;
 use codex_extension_items::ExtensionItem;
 use codex_extension_items::sleep::SleepItem;
 use codex_features::Feature;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -17,8 +19,6 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use core_test_support::context_snapshot;
@@ -481,14 +481,16 @@ async fn queue_only_agent_mail_wakes_sleeping_root_and_persists_message() {
     assert!(history.items.iter().any(|item| {
         matches!(
             item,
-            RolloutItem::ResponseItem(codex_protocol::models::ResponseItem::AgentMessage {
-                content,
-                ..
-            }) if content.iter().any(|content| matches!(
-                content,
-                codex_protocol::models::AgentMessageInputContent::InputText { text }
-                    if text == CHILD_MESSAGE
-            ))
+            RolloutItem::ResponseItem(envelope)
+                if matches!(
+                    &envelope.item,
+                    codex_protocol::models::ResponseItem::AgentMessage { content, .. }
+                        if content.iter().any(|content| matches!(
+                            content,
+                            codex_protocol::models::AgentMessageInputContent::InputText { text }
+                                if text == CHILD_MESSAGE
+                        ))
+                )
         )
     }));
 }

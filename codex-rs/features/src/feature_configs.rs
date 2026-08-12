@@ -10,9 +10,9 @@ pub struct ToolRegistryConfigToml {
     /// Fail the turn when multiple tools share the same effective name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_on_tool_collisions: Option<bool>,
-    /// Include authoritative tool information in request metadata.
+    /// Include authoritative tool information in per-turn request metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_tool_metadata: Option<bool>,
+    pub turn_metadata_includes_tool_info: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -37,10 +37,6 @@ impl FeatureConfig for CodeModeConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
     }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -57,10 +53,6 @@ impl FeatureConfig for CodeModeHostConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
     }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -76,10 +68,6 @@ pub struct NonPrefixedMcpToolNamesConfigToml {
 impl FeatureConfig for NonPrefixedMcpToolNamesConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
     }
 }
 
@@ -134,10 +122,6 @@ impl FeatureConfig for MultiAgentV2ConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
     }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -172,10 +156,6 @@ impl FeatureConfig for TokenBudgetConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
     }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
@@ -200,10 +180,6 @@ pub struct RolloutBudgetConfigToml {
 impl FeatureConfig for RolloutBudgetConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
     }
 }
 
@@ -245,10 +221,6 @@ pub struct CurrentTimeReminderConfigToml {
 impl FeatureConfig for CurrentTimeReminderConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
     }
 }
 
@@ -293,10 +265,6 @@ pub struct NetworkProxyConfigToml {
 impl FeatureConfig for NetworkProxyConfigToml {
     fn enabled(&self) -> Option<bool> {
         self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = Some(enabled);
     }
 }
 
