@@ -13,7 +13,7 @@ Make NiuBash a first-class Codex shell on Windows instead of relying only on a c
 
 ## Implementation Phases
 
-1. Add `ShellType::NiuBash`
+1. Add `ShellType::Niu`
    - Recognize `niu` and `niu.exe`.
    - Report the stable shell name as `niu`.
    - Resolve via PATH first, then common Windows install locations.

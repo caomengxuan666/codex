@@ -6,7 +6,7 @@ use existing release assets from the NiuBash project when publishing this fork.
 
 ## Scope
 
-- Codex detects `niu` and `niu.exe` as `ShellType::NiuBash`.
+- Codex detects `niu` and `niu.exe` as `ShellType::Niu`.
 - Windows default shell selection prefers NiuBash when available.
 - NiuBash command execution uses `niu -C` for profile-aware shell sessions
   and `niu -c` for plain shell sessions.
@@ -17,11 +17,13 @@ use existing release assets from the NiuBash project when publishing this fork.
 
 ## Manual Asset Checklist
 
-- Do not run Codex release workflows for this branch.
-- Use the existing NiuBash release archive from the sibling NiuBash repo, for
-  example `../niu/dist/niu-v0.10.3.zip`.
-- Attach the NiuBash installer or portable archive from the NiuBash release page
-  if GitHub-hosted assets are preferred.
+- Build the Windows x64 zip either locally or with the
+  `niu-codex-windows-build` workflow (manual dispatch).
+- Name the release and tag `niu-codex-preview-<YYYYMMDD>` and the asset
+  `niu-codex-preview-<YYYYMMDD>-windows-x86_64.zip`.
+- The zip contains a top-level directory of the same name holding:
+  `codex.exe`, `codex-command-runner.exe`, `codex-windows-sandbox-setup.exe`,
+  `README.md`, and this `RELEASE.md`.
 - Include this repository commit SHA in the release description.
 - Smoke test on Windows with:
 
@@ -49,8 +51,11 @@ instead of routing command execution through PowerShell by default.
 
 ### Assets
 
-Use the existing NiuBash release assets for the shell runtime. This release does
-not introduce a Codex GitHub Actions release workflow.
+- `niu-codex-preview-<YYYYMMDD>-windows-x86_64.zip` — Codex CLI plus the
+  Windows sandbox helpers (`codex-command-runner.exe`,
+  `codex-windows-sandbox-setup.exe`), built from this branch.
+- The NiuBash shell runtime itself is installed separately from the
+  [NiuBash releases page](https://github.com/caomengxuan666/dsh-niu/releases).
 
 ### Notes
 
