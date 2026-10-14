@@ -142,17 +142,17 @@ fn derive_exec_args() {
         vec!["pwsh.exe", "-Command", "echo hello"]
     );
 
-    let test_winuxsh_shell = Shell {
-        shell_type: ShellType::Winuxsh,
-        shell_path: PathBuf::from("winuxsh.exe"),
+    let test_niu_shell = Shell {
+        shell_type: ShellType::Niu,
+        shell_path: PathBuf::from("niu.exe"),
     };
     assert_eq!(
-        test_winuxsh_shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
-        vec!["winuxsh.exe", "-c", "echo hello"]
+        test_niu_shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
+        vec!["niu.exe", "-c", "echo hello"]
     );
     assert_eq!(
-        test_winuxsh_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
-        vec!["winuxsh.exe", "-C", "echo hello"]
+        test_niu_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
+        vec!["niu.exe", "-C", "echo hello"]
     );
 }
 

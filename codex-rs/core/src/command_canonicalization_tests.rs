@@ -54,9 +54,9 @@ fn canonicalizes_heredoc_scripts_to_stable_script_key() {
 }
 
 #[test]
-fn canonicalizes_winuxsh_scripts_like_other_bash_like_shells() {
+fn canonicalizes_niu_scripts_like_other_bash_like_shells() {
     let command = vec![
-        "winuxsh.exe".to_string(),
+        "niu.exe".to_string(),
         "-C".to_string(),
         "cargo test -p codex-core".to_string(),
     ];

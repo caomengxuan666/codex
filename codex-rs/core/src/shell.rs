@@ -29,7 +29,7 @@ impl Shell {
                     command.to_string(),
                 ]
             }
-            ShellType::Winuxsh => {
+            ShellType::Niu => {
                 let arg = if use_login_shell { "-C" } else { "-c" };
                 vec![
                     self.shell_path.to_string_lossy().to_string(),
@@ -74,7 +74,7 @@ impl Shell {
             "powershell" => ShellType::PowerShell,
             "sh" => ShellType::Sh,
             "cmd" => ShellType::Cmd,
-            "winuxsh" => ShellType::Winuxsh,
+            "niu" => ShellType::Niu,
             name => anyhow::bail!("unknown environment shell `{name}`"),
         };
 
@@ -107,19 +107,19 @@ mod platform_independent_tests {
     use super::*;
 
     #[test]
-    fn winuxsh_uses_profile_and_no_profile_exec_args() {
+    fn niu_uses_profile_and_no_profile_exec_args() {
         let shell = Shell {
-            shell_type: ShellType::Winuxsh,
-            shell_path: PathBuf::from("winuxsh.exe"),
+            shell_type: ShellType::Niu,
+            shell_path: PathBuf::from("niu.exe"),
         };
 
         assert_eq!(
             shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
-            vec!["winuxsh.exe", "-c", "echo hello"]
+            vec!["niu.exe", "-c", "echo hello"]
         );
         assert_eq!(
             shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
-            vec!["winuxsh.exe", "-C", "echo hello"]
+            vec!["niu.exe", "-C", "echo hello"]
         );
     }
 }

@@ -109,7 +109,7 @@ pub fn extract_bash_command(command: &[String]) -> Option<(&str, &str)> {
         Some(ShellType::Zsh | ShellType::Bash | ShellType::Sh) => {
             matches!(flag.as_str(), "-lc" | "-c")
         }
-        Some(ShellType::Winuxsh) => matches!(flag.as_str(), "-C" | "--repl-command" | "-c"),
+        Some(ShellType::Niu) => matches!(flag.as_str(), "-C" | "--repl-command" | "-c"),
         _ => false,
     };
     if !valid_shell_flag {
@@ -537,10 +537,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_winuxsh_repl_command_plain_commands() {
+    fn parse_niu_repl_command_plain_commands() {
         for flag in ["-C", "--repl-command"] {
             let command = vec![
-                "winuxsh".to_string(),
+                "niu".to_string(),
                 flag.to_string(),
                 "git status".to_string(),
             ];

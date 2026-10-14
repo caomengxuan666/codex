@@ -323,11 +323,11 @@ mod tests {
     }
 
     #[test]
-    fn winuxsh_repl_command_supports_cat() {
+    fn niu_repl_command_supports_cat() {
         let inner = "cat README.md";
         for flag in ["-C", "--repl-command"] {
             assert_parsed(
-                &vec_str(&["winuxsh", flag, inner]),
+                &vec_str(&["niu", flag, inner]),
                 vec![ParsedCommand::Read {
                     cmd: inner.to_string(),
                     name: "README.md".to_string(),

@@ -1,4 +1,4 @@
-name: winuxsh-codex-windows-build
+name: niu-codex-windows-build
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       artifact_name:
         description: "Artifact name"
         required: false
-        default: "winuxsh-codex-preview-windows-x86_64"
+        default: "niu-codex-preview-windows-x86_64"
       release_tag:
         description: "Optional GitHub release tag to upload the zip to"
         required: false

@@ -537,14 +537,14 @@ mod tests {
     }
 
     #[test]
-    fn winuxsh_repl_command_safe_command_sequence() {
+    fn niu_repl_command_safe_command_sequence() {
         assert!(is_known_safe_command(&vec_str(&[
-            "winuxsh",
+            "niu",
             "-C",
             "git status",
         ])));
         assert!(!is_known_safe_command(&vec_str(&[
-            "winuxsh",
+            "niu",
             "-C",
             "ls && rm -rf /",
         ])));

@@ -85,7 +85,7 @@ fn retry_uses_original_unified_exec_request_and_stops_after_second_failure() {
         },
         read_roots_override: Some(vec![PathBuf::from(r"C:\workspace\read")]),
         read_roots_include_platform_defaults: true,
-        additional_read_roots: vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\winuxsh")],
+        additional_read_roots: vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\niu")],
         write_roots_override: Some(vec![PathBuf::from(r"C:\workspace\write")]),
         deny_read_paths_override: vec![PathBuf::from(r"C:\secrets")],
         deny_write_paths_override: vec![PathBuf::from(r"C:\workspace\.codex")],

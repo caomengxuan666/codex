@@ -66,7 +66,7 @@ pub(crate) fn tool_user_shell_type(
         crate::shell::ShellType::PowerShell => codex_tools::ToolUserShellType::PowerShell,
         crate::shell::ShellType::Sh => codex_tools::ToolUserShellType::Sh,
         crate::shell::ShellType::Cmd => codex_tools::ToolUserShellType::Cmd,
-        crate::shell::ShellType::Winuxsh => codex_tools::ToolUserShellType::Winuxsh,
+        crate::shell::ShellType::Niu => codex_tools::ToolUserShellType::Niu,
     }
 }
 

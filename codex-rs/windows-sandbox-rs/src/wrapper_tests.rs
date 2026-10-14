@@ -42,7 +42,7 @@ fn windows_wrapper_args_round_trip() {
         network: NetworkSandboxPolicy::Restricted,
     };
     let read_roots_override = vec![PathBuf::from(r"C:\read")];
-    let additional_read_roots = vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\winuxsh")];
+    let additional_read_roots = vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\niu")];
     let write_roots_override = vec![PathBuf::from(r"C:\write")];
     let deny_read_paths_override = vec![
         AbsolutePathBuf::from_absolute_path(Path::new(r"C:\blocked-read"))

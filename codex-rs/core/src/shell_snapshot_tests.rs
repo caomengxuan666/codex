@@ -108,7 +108,7 @@ fn shell_snapshot_support_excludes_non_replayable_shells() {
     assert!(shell_snapshot_supported(ShellType::Sh));
     assert!(!shell_snapshot_supported(ShellType::PowerShell));
     assert!(!shell_snapshot_supported(ShellType::Cmd));
-    assert!(!shell_snapshot_supported(ShellType::Winuxsh));
+    assert!(!shell_snapshot_supported(ShellType::Niu));
 }
 
 #[test]

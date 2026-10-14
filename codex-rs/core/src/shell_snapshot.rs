@@ -49,7 +49,7 @@ const EXCLUDED_EXPORT_VARS: &[&str] = &["PWD", "OLDPWD"];
 fn shell_snapshot_supported(shell_type: ShellType) -> bool {
     !matches!(
         shell_type,
-        ShellType::PowerShell | ShellType::Cmd | ShellType::Winuxsh
+        ShellType::PowerShell | ShellType::Cmd | ShellType::Niu
     )
 }
 
@@ -244,7 +244,7 @@ async fn capture_snapshot(shell: &Shell, cwd: &AbsolutePathBuf) -> Result<String
         ShellType::Zsh => run_shell_script(shell, &zsh_snapshot_script(), cwd).await,
         ShellType::Bash => run_shell_script(shell, &bash_snapshot_script(), cwd).await,
         ShellType::Sh => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
-        ShellType::Winuxsh => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
+        ShellType::Niu => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
         ShellType::PowerShell => run_shell_script(shell, powershell_snapshot_script(), cwd).await,
         ShellType::Cmd => bail!("Shell snapshotting is not yet supported for {shell_type:?}"),
     }

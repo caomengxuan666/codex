@@ -1,18 +1,18 @@
-## Codex CLI + Winuxsh
+## Codex CLI + NiuBash
 
-This branch makes Winuxsh a first-class Windows shell for Codex CLI.
+This branch makes NiuBash a first-class Windows shell for Codex CLI.
 
-- Detects `winuxsh` and `winuxsh.exe` as a stable shell type.
-- Prefers Winuxsh on Windows when it is installed, then falls back to
+- Detects `niu` and `niu.exe` as a stable shell type.
+- Prefers NiuBash on Windows when it is installed, then falls back to
   PowerShell and `cmd.exe`.
-- Runs Winuxsh commands with `winuxsh -C <script>` for profile-aware sessions
-  and `winuxsh -c <script>` for plain non-login execution.
+- Runs NiuBash commands with `niu -C <script>` for profile-aware sessions
+  and `niu -c <script>` for plain non-login execution.
 - Reuses the existing bash-like parsing, safety checks, approval
   canonicalization, and `apply_patch` interception paths.
 
-Install Winuxsh from the
-[Winuxsh releases page](https://github.com/unixwin/winuxsh/releases), make sure
-`winuxsh.exe` is on `PATH`, then run Codex normally on Windows. See
+Install NiuBash from the
+[NiuBash releases page](https://github.com/caomengxuan666/dsh-niu/releases), make sure
+`niu.exe` is on `PATH`, then run Codex normally on Windows. See
 [`RELEASE.md`](RELEASE.md) for the manual release notes and asset checklist for
 this fork.
 
