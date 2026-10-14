@@ -7,6 +7,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
+use codex_diagnostics::GaugeGuard;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::request_permissions::RequestPermissionProfile;
@@ -18,7 +19,6 @@ use rmcp::model::RequestId;
 use tokio::sync::oneshot;
 
 use crate::agent::control::AgentExecutionGuard;
-use crate::codex_thread::TryStartTurnIfIdleRejectionReason;
 use crate::mcp_tool_call::McpToolApprovalMetadata;
 use crate::session::TurnInputQueue;
 use crate::session::turn_context::TurnContext;
@@ -75,12 +75,11 @@ pub(crate) struct RunningTask {
     pub(crate) done: Arc<Notify>,
     pub(crate) kind: TaskKind,
     pub(crate) task: Arc<dyn AnySessionTask>,
-    pub(crate) input_persisted:
-        Option<oneshot::Sender<Result<(), TryStartTurnIfIdleRejectionReason>>>,
     pub(crate) cancellation_token: CancellationToken,
     pub(crate) handle: AbortOnDropHandle<()>,
     pub(crate) turn_context: Arc<TurnContext>,
     pub(crate) _agent_execution_guard: Option<AgentExecutionGuard>,
+    pub(crate) _diagnostics_guard: GaugeGuard,
     // Timer recorded when the task drops to capture the full turn duration.
     pub(crate) _timer: Option<codex_otel::Timer>,
 }

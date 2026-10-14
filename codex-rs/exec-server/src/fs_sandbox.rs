@@ -13,6 +13,7 @@ use codex_sandboxing::SandboxDirectSpawnTransformRequest;
 use codex_sandboxing::SandboxExecRequest;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxTransformRequest;
+use codex_sandboxing::SandboxType;
 use codex_sandboxing::SandboxablePreference;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::canonicalize_preserving_symlinks;
@@ -114,10 +115,15 @@ impl FileSystemSandboxRunner {
         let sandbox_manager = SandboxManager::new();
         let sandbox = sandbox_manager.select_initial(
             permission_profile,
-            SandboxablePreference::Auto,
+            SandboxablePreference::Require,
             sandbox_context.windows_sandbox_level,
             /*has_managed_network_requirements*/ false,
         );
+        if sandbox == SandboxType::None {
+            return Err(invalid_request(
+                "filesystem sandbox cannot be enforced on this executor".to_string(),
+            ));
+        }
         let command = SandboxCommand {
             program: helper.as_path().as_os_str().to_owned(),
             args: vec![CODEX_FS_HELPER_ARG1.to_string()],
@@ -327,7 +333,7 @@ fn spawn_command(
     SandboxExecRequest {
         command: argv,
         cwd,
-        env,
+        mut env,
         arg0,
         ..
     }: SandboxExecRequest,
@@ -346,6 +352,7 @@ fn spawn_command(
     // TODO(anp): Keep PathUri through the filesystem helper launch boundary.
     let cwd = cwd.to_abs_path().map_err(io_error)?;
     command.current_dir(cwd.as_path());
+    env.retain(|name, _| !codex_protocol::shell_environment::is_non_inheritable_env_var(name));
     command.env_clear();
     command.envs(env);
     command.stdin(std::process::Stdio::piped());
@@ -544,10 +551,11 @@ mod tests {
         let runner = FileSystemSandboxRunner::new(runtime_paths);
         let native_cwd = AbsolutePathBuf::current_dir().expect("cwd");
         let cwd = PathUri::from_abs_path(&native_cwd);
-        let file_system_policy = restricted_policy(vec![path_entry(
-            native_cwd.clone(),
-            FileSystemAccessMode::Write,
-        )]);
+        let file_system_policy = restricted_policy(vec![
+            #[cfg(windows)]
+            special_entry(FileSystemSpecialPath::Root, FileSystemAccessMode::Read),
+            path_entry(native_cwd.clone(), FileSystemAccessMode::Write),
+        ]);
         let network_policy = NetworkSandboxPolicy::Restricted;
         let permission_profile =
             PermissionProfile::from_runtime_permissions(&file_system_policy, network_policy);
@@ -555,6 +563,26 @@ mod tests {
         let sandbox_cwd = SandboxCwd {
             uri: cwd,
             native: native_cwd,
+        };
+        #[cfg(windows)]
+        let sandbox_context = {
+            let error = runner
+                .sandbox_exec_request(
+                    &permission_profile,
+                    &sandbox_cwd,
+                    std::slice::from_ref(&sandbox_cwd.native),
+                    &sandbox_context,
+                )
+                .expect_err("disabled Windows sandbox must not run the helper unsandboxed");
+            assert_eq!(
+                error.message,
+                "filesystem sandbox cannot be enforced on this executor"
+            );
+            crate::FileSystemSandboxContext {
+                windows_sandbox_level:
+                    codex_protocol::config_types::WindowsSandboxLevel::RestrictedToken,
+                ..sandbox_context
+            }
         };
 
         let request = runner

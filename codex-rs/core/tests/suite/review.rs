@@ -5,6 +5,8 @@ use codex_core::config::Constrained;
 use codex_core::find_thread_path_by_id_str;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_features::Feature;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::items::TurnItem;
@@ -26,8 +28,6 @@ use codex_protocol::protocol::ReviewLineRange;
 use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::review_format::render_review_output_text;
@@ -242,7 +242,9 @@ async fn review_op_emits_lifecycle_and_review_output() {
         }
         let v: serde_json::Value = serde_json::from_str(line).expect("jsonl line");
         let rl: RolloutLine = serde_json::from_value(v).expect("rollout line");
-        if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) = rl.item {
+        if let RolloutItem::ResponseItem(envelope) = rl.item
+            && let ResponseItem::Message { role, content, .. } = envelope.item
+        {
             if role == "user" {
                 for c in content {
                     if let ContentItem::InputText { text } = c {
@@ -619,7 +621,6 @@ async fn review_uses_updated_turn_permissions_and_approval_policy() {
         .with_config(|config| {
             config.review_model = Some("gpt-5.4".to_string());
             config.model_context_window = Some(128_000);
-            config.config_lock_export_dir = Some(config.codex_home.join("review-config-locks"));
             config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
             config
                 .features
@@ -1029,7 +1030,8 @@ async fn review_input_isolated_from_parent_history() {
         }
         let v: serde_json::Value = serde_json::from_str(line).expect("jsonl line");
         let rl: RolloutLine = serde_json::from_value(v).expect("rollout line");
-        if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) = rl.item
+        if let RolloutItem::ResponseItem(envelope) = rl.item
+            && let ResponseItem::Message { role, content, .. } = envelope.item
             && role == "user"
         {
             for c in content {

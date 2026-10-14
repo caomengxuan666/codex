@@ -76,6 +76,8 @@ use codex_core::path_utils;
 use codex_core::read_session_meta_line;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::get_git_repo_root;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 use codex_login::enforce_login_restrictions;
@@ -92,8 +94,6 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
@@ -245,7 +245,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     }
 
     let Cli {
-        psp,
         command,
         strict_config,
         shared,
@@ -423,7 +422,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         tools_web_search_request: None,
         ephemeral: ephemeral.then_some(true),
         bypass_hook_trust: bypass_hook_trust.then_some(true),
-        psp: Some(psp),
         additional_writable_roots: add_dir,
     };
 

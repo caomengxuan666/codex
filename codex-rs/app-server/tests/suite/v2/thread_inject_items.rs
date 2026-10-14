@@ -12,8 +12,8 @@ use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_core::RolloutRecorder;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::InitialHistory;
-use codex_protocol::protocol::RolloutItem;
+use codex_rollout::InitialHistory;
+use codex_rollout::RolloutItem;
 use core_test_support::responses;
 use core_test_support::responses::strip_response_item_id;
 use core_test_support::responses::strip_response_item_ids_from_json;
@@ -79,7 +79,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
         resumed_history
             .history
             .iter()
-            .any(|item| matches!(item, RolloutItem::ResponseItem(response_item) if strip_response_item_id(responses::strip_metadata(response_item.clone())) == injected_item)),
+            .any(|item| matches!(item, RolloutItem::ResponseItem(response_item) if strip_response_item_id(responses::strip_metadata(response_item.item.clone())) == injected_item)),
         "injected item should be persisted in rollout history"
     );
 
