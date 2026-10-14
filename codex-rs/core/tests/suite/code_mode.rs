@@ -10,7 +10,12 @@ use codex_core::config::Config;
 use codex_core::config::CurrentTimeReminderConfig;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ToolCallOutcome;
 use codex_extension_api::ToolContributor;
+use codex_extension_api::ToolFinishInput;
+use codex_extension_api::ToolLifecycleContributor;
+use codex_extension_api::ToolLifecycleFuture;
+use codex_extension_api::ToolStartInput;
 use codex_features::CurrentTimeSource;
 use codex_features::Feature;
 use codex_login::CodexAuth;
@@ -71,7 +76,13 @@ use core_test_support::wait_for_mcp_server;
 use image::DynamicImage;
 use image::GenericImageView;
 use image::ImageBuffer;
+use image::ImageDecoder;
+use image::ImageEncoder;
+use image::ImageFormat;
+use image::ImageReader;
 use image::Rgba;
+use image::codecs::png::PngEncoder;
+use image::metadata::Orientation;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -80,11 +91,13 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 use test_case::test_case;
+use tokio::sync::oneshot;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -3246,6 +3259,208 @@ text("after yield");
     Ok(())
 }
 
+struct InterruptedNestedToolObserver {
+    started: Mutex<Option<oneshot::Sender<String>>>,
+    finished: Mutex<Option<oneshot::Sender<ToolCallOutcome>>>,
+}
+
+impl ToolLifecycleContributor for InterruptedNestedToolObserver {
+    fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move {
+            let codex_extension_api::ToolCallSource::CodeMode { cell_id, .. } = input.source else {
+                return;
+            };
+            if input.tool_name.name != "test_sync_tool" {
+                return;
+            }
+            if let Some(started) = self
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ = started.send(cell_id);
+            }
+        })
+    }
+
+    fn on_tool_finish<'a>(&'a self, input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move {
+            if input.tool_name.name != "test_sync_tool"
+                || !matches!(
+                    input.source,
+                    codex_extension_api::ToolCallSource::CodeMode { .. }
+                )
+            {
+                return;
+            }
+            if let Some(finished) = self
+                .finished
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ = finished.send(input.outcome);
+            }
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_interrupt_terminates_active_cells_and_nested_tools() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (started_tx, started_rx) = oneshot::channel();
+    let (finished_tx, finished_rx) = oneshot::channel();
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.tool_lifecycle_contributor(Arc::new(InterruptedNestedToolObserver {
+        started: Mutex::new(Some(started_tx)),
+        finished: Mutex::new(Some(finished_tx)),
+    }));
+
+    let server = responses::start_mock_server().await;
+    let mut builder = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(|config| {
+            let _ = config.features.enable(Feature::CodeMode);
+            let _ = config.features.enable(Feature::CodeModeInterrupt);
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    let setup = responses::mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-store"),
+                ev_custom_tool_call("call-store", "exec", r#"store("persisted", "preserved");"#),
+                ev_completed("resp-store"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-store", "stored"),
+                ev_completed("resp-store-complete"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-background"),
+                ev_custom_tool_call(
+                    "call-background",
+                    "exec",
+                    "yield_control(); await new Promise(() => {});",
+                ),
+                ev_completed("resp-background"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-background", "running"),
+                ev_completed("resp-background-complete"),
+            ]),
+        ],
+    )
+    .await;
+
+    test.submit_turn("store a value in the reusable code-mode session")
+        .await?;
+    test.submit_turn("start a background code-mode cell")
+        .await?;
+    let background_response = setup
+        .last_request()
+        .expect("background cell should be returned to the model");
+    let background_items = custom_tool_output_items(&background_response, "call-background");
+    assert!(
+        text_item(&background_items, /*index*/ 0).starts_with("Script running with cell ID "),
+        "background cell should remain active: {background_items:?}"
+    );
+    let background_cell_id =
+        extract_running_cell_id(text_item(&background_items, /*index*/ 0));
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-interrupted"),
+            ev_custom_tool_call(
+                "call-interrupted",
+                "exec",
+                "await tools.test_sync_tool({ sleep_after_ms: 60_000 });",
+            ),
+            ev_completed("resp-interrupted"),
+        ]),
+    )
+    .await;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "start a long-running nested tool".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let active_cell_id = tokio::time::timeout(Duration::from_secs(10), started_rx).await??;
+
+    test.codex.submit(Op::Interrupt).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnAborted(_))
+    })
+    .await;
+    let nested_outcome = tokio::time::timeout(Duration::from_secs(10), finished_rx).await??;
+    assert_eq!(nested_outcome, ToolCallOutcome::Aborted);
+
+    let recovery = responses::mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-wait-background"),
+                responses::ev_function_call(
+                    "call-wait-background",
+                    "wait",
+                    &serde_json::to_string(&serde_json::json!({
+                        "cell_id": background_cell_id,
+                        "yield_time_ms": 1,
+                    }))?,
+                ),
+                ev_completed("resp-wait-background"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-wait-active"),
+                responses::ev_function_call(
+                    "call-wait-active",
+                    "wait",
+                    &serde_json::to_string(&serde_json::json!({
+                        "cell_id": active_cell_id,
+                        "yield_time_ms": 1,
+                    }))?,
+                ),
+                ev_completed("resp-wait-active"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-recovery"),
+                ev_custom_tool_call("call-recovery", "exec", r#"text(load("persisted"));"#),
+                ev_completed("resp-recovery"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-recovery", "recovered"),
+                ev_completed("resp-recovery-complete"),
+            ]),
+        ],
+    )
+    .await;
+
+    test.submit_turn("verify interrupted cells and reuse their session")
+        .await?;
+    let requests = recovery.requests();
+    let background_output = function_tool_output_items(&requests[1], "call-wait-background");
+    assert!(text_item(&background_output, /*index*/ 1).contains("not found"));
+    let active_output = function_tool_output_items(&requests[2], "call-wait-active");
+    assert!(text_item(&active_output, /*index*/ 1).contains("not found"));
+    let recovery_items = custom_tool_output_items(&requests[3], "call-recovery");
+    assert_eq!(text_item(&recovery_items, /*index*/ 1), "preserved");
+
+    Ok(())
+}
+
 #[cfg_attr(windows, ignore = "no exec_command on Windows")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_wait_uses_its_own_max_tokens_budget() -> Result<()> {
@@ -3829,6 +4044,53 @@ image(s.trim(), "original");
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_view_image_rejects_invalid_file_without_exposing_contents() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const INVALID_IMAGE_CONTENTS: &str = "private-file-contents-must-not-be-exposed";
+
+    let server = responses::start_mock_server().await;
+    let builder = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(|config| {
+            let _ = config.features.enable(Feature::CodeMode);
+        })
+        .with_workspace_setup(|cwd, _fs| async move {
+            fs::write(
+                cwd.join("not-an-image.txt").as_path(),
+                INVALID_IMAGE_CONTENTS,
+            )?;
+            Ok(())
+        });
+    let (_test, second_mock) = run_code_mode_turn_with_builder(
+        &server,
+        "use exec to call view_image on a non-image file",
+        r#"await tools.view_image({ path: "not-an-image.txt" });"#,
+        builder,
+    )
+    .await?;
+
+    let request = second_mock.single_request();
+    let (output, success) = custom_tool_output_body_and_success(&request, "call-1");
+    assert_ne!(
+        success,
+        Some(true),
+        "code-mode view_image unexpectedly accepted a non-image file"
+    );
+    assert!(
+        output.contains("unable to process image: invalid or unsupported image data"),
+        "unexpected code-mode failure: {output}"
+    );
+    let model_visible_output = serde_json::to_string(&request.custom_tool_call_output("call-1"))?;
+    assert!(
+        !model_visible_output.contains(INVALID_IMAGE_CONTENTS),
+        "invalid file contents leaked into model-visible output: {model_visible_output}"
+    );
+
+    Ok(())
+}
+
 #[test_case(false; "legacy detail")]
 #[test_case(true; "unified image budget")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3848,11 +4110,26 @@ async fn code_mode_can_use_view_image_result_with_image_helper(
         });
     let test = builder.build(&server).await?;
 
-    let image_bytes = BASE64_STANDARD.decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+    let image = ImageBuffer::from_pixel(
+        /*width*/ 2,
+        /*height*/ 1,
+        Rgba([255u8, 0, 0, 255]),
+    );
+    let rotate_90_exif = vec![
+        0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let mut image_bytes = Vec::new();
+    let mut encoder = PngEncoder::new(&mut image_bytes);
+    encoder.set_exif_metadata(rotate_90_exif.clone())?;
+    encoder.write_image(
+        image.as_raw(),
+        image.width(),
+        image.height(),
+        image::ColorType::Rgba8.into(),
     )?;
     let image_path = test.cwd_path().join("code_mode_view_image.png");
-    fs::write(&image_path, image_bytes)?;
+    fs::write(&image_path, &image_bytes)?;
 
     let image_path_json = serde_json::to_string(&image_path.to_string_lossy().to_string())?;
     let expected_output_keys = if unified_image_budget {
@@ -3920,6 +4197,21 @@ image(out);
         .and_then(Value::as_str)
         .expect("image helper should emit an input_image item with image_url");
     assert!(emitted_image_url.starts_with("data:image/png;base64,"));
+    let (_, emitted_image_base64) = emitted_image_url
+        .split_once(',')
+        .expect("emitted image should contain a data URL prefix");
+    let emitted_image_bytes = BASE64_STANDARD.decode(emitted_image_base64)?;
+    assert_eq!(emitted_image_bytes, image_bytes);
+    let mut decoder = ImageReader::with_format(Cursor::new(&emitted_image_bytes), ImageFormat::Png)
+        .into_decoder()?;
+    assert_eq!(
+        (
+            decoder.dimensions(),
+            decoder.orientation()?,
+            decoder.exif_metadata()?
+        ),
+        ((2, 1), Orientation::Rotate90, Some(rotate_90_exif))
+    );
     assert_eq!(
         items[1].get("detail").and_then(Value::as_str),
         Some("original")
@@ -4644,6 +4936,7 @@ async fn code_mode_uses_the_first_dynamic_tool_for_a_normalized_name() -> Result
                 model_info.tool_mode = Some(ToolMode::CodeMode);
             })
             .with_config(|config| {
+                config.tool_registry.turn_metadata_includes_tool_info = true;
                 config
                     .features
                     .enable(Feature::CodeMode)
@@ -4832,18 +5125,9 @@ text(JSON.stringify({
                     .as_str()
                     .expect("Responses Lite should contain serialized turn metadata"),
             )?;
-            assert_eq!(
-                metadata["code_mode_tool_names"]["foo_bar"],
-                serde_json::json!({
-                    "name": "foo-bar",
-                    "namespace": null,
-                }),
-            );
-            assert!(
-                metadata["code_mode_tool_names"]
-                    .get("tool_search")
-                    .is_none()
-            );
+            let functions = &metadata["tool_namespaces_info"]["functions"]["functions"];
+            assert_eq!(functions["foo-bar"]["code_mode_name"], "foo_bar");
+            assert!(functions["foo_bar"]["code_mode_name"].is_null());
         }
 
         let exec_description = model_tools

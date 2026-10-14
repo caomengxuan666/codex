@@ -1,6 +1,8 @@
 mod app_mcp_routing;
+mod artifact_operation;
 mod command_migration;
 mod discoverable;
+mod error_subtype;
 mod http_client_selector;
 pub mod installed_marketplaces;
 pub mod loader;
@@ -19,6 +21,7 @@ pub mod remote_bundle;
 pub mod remote_legacy;
 mod remote_plugin_id_resolver;
 mod script_attribution;
+mod skill_snapshots;
 pub mod startup_sync;
 pub mod store;
 #[cfg(test)]
@@ -41,6 +44,8 @@ pub type LoadedPlugin = codex_plugin::LoadedPlugin<codex_config::McpServerConfig
 pub type PluginLoadOutcome = codex_plugin::PluginLoadOutcome<codex_config::McpServerConfig>;
 
 pub use app_mcp_routing::apps_route_available;
+pub use artifact_operation::ArtifactOperation;
+pub use artifact_operation::recognize_artifact_operation;
 pub use command_migration::CommandDescriptionMode;
 pub use command_migration::CommandMigrationProfile;
 pub use command_migration::RewriteProfile as CommandRewriteProfile;
@@ -76,3 +81,4 @@ pub use remote::RecommendedPlugin;
 pub use remote::RecommendedPluginsMode;
 pub use script_attribution::PluginCommandAttribution;
 pub use script_attribution::TrustedPluginRoots;
+pub use script_attribution::command_script_arguments;

@@ -94,6 +94,7 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_app_server_protocol::UserInput as AppServerUserInput;
 use codex_app_server_protocol::WarningNotification;
+use codex_history::RolloutItem;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
 use codex_models_manager::test_support::get_model_offline_for_tests;
 use codex_otel::SessionTelemetry;
@@ -113,7 +114,6 @@ use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MAX_THREAD_GOAL_OBJECTIVE_CHARS;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionSource as RolloutSessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -225,6 +225,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
     app.handle_mcp_inventory_result(
         Ok(vec![McpServerStatus {
             name: "docs".to_string(),
+            plugin_id: None,
             server_info: None,
             tools: HashMap::new(),
             resources: Vec::new(),
@@ -6590,8 +6591,38 @@ async fn prompt_edit_forks_before_selected_prompt_and_preserves_source() -> Resu
             crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig,
         )
         .await?;
+    let selected_turn = started.turns[1].clone();
     app.enqueue_primary_thread_session(started.session, started.turns)
         .await?;
+    {
+        let mut store = app
+            .thread_event_channels
+            .get(&source_thread_id)
+            .expect("source thread event channel")
+            .store
+            .lock()
+            .await;
+        store.turns.pop();
+        store.push_notification(turn_started_notification(
+            source_thread_id,
+            &selected_turn.id,
+        ));
+        for item in selected_turn.items {
+            store.push_notification(ServerNotification::ItemCompleted(
+                codex_app_server_protocol::ItemCompletedNotification {
+                    thread_id: source_thread_id.to_string(),
+                    turn_id: selected_turn.id.clone(),
+                    completed_at_ms: 0,
+                    item,
+                },
+            ));
+        }
+        store.push_notification(turn_completed_notification(
+            source_thread_id,
+            &selected_turn.id,
+            TurnStatus::Interrupted,
+        ));
+    }
     while app_event_rx.try_recv().is_ok() {}
     let source_before = std::fs::read_to_string(&source_path)?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
