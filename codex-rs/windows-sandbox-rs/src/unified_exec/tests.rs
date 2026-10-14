@@ -244,6 +244,7 @@ fn restricted_token_rejects_managed_network_before_spawn() {
             timeout_ms: None,
             read_roots_override: None,
             read_roots_include_platform_defaults: false,
+            additional_read_roots: &[],
             write_roots_override: None,
             deny_read_paths_override: &[],
             deny_write_paths_override: &[],
