@@ -1,0 +1,289 @@
+name: niu-codex-npm-release
+
+# Builds the release artifacts for the @cmx666/codex npm packages from a pinned
+# commit, using upstream's own package builder so the layout matches
+# codex-rs/scripts/codex_package/layout.py exactly.
+#
+# Why CI and not a local build: the version string is compiled in
+# (CARGO_PKG_VERSION), so npm metadata and `codex --version` only agree if the
+# binaries are built from the same revision that carries the bumped
+# [workspace.package].version. Building 300 MB of Rust locally makes that easy
+# to get wrong.
+#
+# Caching: the codex-cli release build is ~59 minutes cold on a windows-latest
+# runner, so it must never be cold twice. Compiled objects go through sccache's
+# local disk cache, which the workflow persists with actions/cache, and the
+# cargo home is cached separately. `target/` itself is deliberately NOT cached:
+# it is 8 GB+ here, which does not fit GitHub's 10 GB per-repo cache budget.
+# Every cache save is `if: always()` because actions/cache's default post step
+# only saves on job success, and the package/verify/publish steps at the end of
+# this job can fail on their own.
+#
+# Publish order matters. The meta package ships only bin/codex.js; its binaries
+# arrive through optionalDependencies as `npm:@cmx666/codex@<version>-win32-x64`.
+# Publish the platform package first, or the meta package installs into a
+# "missing optional dependency" error.
+#
+# Setup: add an npm automation token for the @cmx666 scope as the repository
+# secret NPM_TOKEN before running with publish=true.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to npm (requires the NPM_TOKEN secret)"
+        type: boolean
+        default: false
+      npm_tag:
+        description: "dist-tag for the meta package"
+        type: string
+        default: "latest"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build, package, and optionally publish
+    runs-on: windows-latest
+    timeout-minutes: 360
+    # A cold build occupies a runner for about an hour. Never run two release
+    # builds at once: they compete for the same cache entries and can publish
+    # the same version twice.
+    concurrency:
+      group: niu-codex-npm-release
+      cancel-in-progress: false
+    env:
+      # Incremental artifacts are useless across CI jobs and only inflate the cache.
+      CARGO_INCREMENTAL: "0"
+      # sccache caches compiled crates in a local directory that the workflow
+      # persists with actions/cache. Keep the budget well under GitHub's 10 GB
+      # per-repo limit, which the Bazel caches also draw on, so a single cache
+      # entry cannot evict them.
+      SCCACHE_CACHE_SIZE: 4G
+      # Surface sccache's own warnings. Without this a broken cache degrades
+      # every build to a cold one without saying so.
+      SCCACHE_LOG: warn
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # Compiled objects live in sccache, not in `target/`. A whole-`target`
+      # cache entry is 8 GB+ for this workspace, which does not fit GitHub's
+      # 10 GB per-repo cache budget and evicts the Bazel caches when it is
+      # saved. Only the cargo home (small) is cached as a directory.
+      - name: Compute cache key
+        id: cachekey
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "hash=$(cat codex-rs/Cargo.lock codex-rs/rust-toolchain.toml codex-rs/.cargo/config.toml | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cargo home cache
+        id: cargo_home_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-windows-x64-${{ steps.cachekey.outputs.hash }}
+          restore-keys: |
+            cargo-home-windows-x64-
+
+      # sccache intentionally uses its local disk cache only. Its GitHub Actions
+      # cache backend is unusable from here: `run` steps on this runner never
+      # receive ACTIONS_CACHE_URL / ACTIONS_RUNTIME_TOKEN (verified 2026-10-17,
+      # all four cache variables empty), and sccache treats the missing endpoint
+      # as a fatal server startup error ("cache url for ghac not found") instead
+      # of degrading, so requesting ghac would kill the release build. ghac also
+      # drops writes on HTTP 429 without retrying (mozilla/sccache#2821).
+      #
+      # The version belongs in `tool`: taiki-e/install-action has no `version`
+      # input and silently installs latest when one is passed. Pinned rather than
+      # floating so the on-disk cache format is stable. 0.18.0's open panic is
+      # x64 Linux only (mozilla/sccache#2869); this runner is Windows x64.
+      - name: Install sccache
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sccache@0.18.0
+
+      - name: Point sccache at a cacheable directory and wrap rustc
+        shell: bash
+        run: |
+          set -euo pipefail
+          sccache_dir="${RUNNER_TEMP}/sccache"
+          wrapper="$(command -v sccache)"
+          if [[ "${RUNNER_OS}" == "Windows" ]] && command -v cygpath >/dev/null 2>&1; then
+            # sccache and actions/cache both take native paths on Windows.
+            sccache_dir="$(cygpath -w "${sccache_dir}")"
+            wrapper="$(cygpath -w "${wrapper}")"
+          fi
+          echo "SCCACHE_DIR=${sccache_dir}" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=${sccache_dir}"
+          echo "RUSTC_WRAPPER=${wrapper}"
+
+      - name: Restore sccache cache
+        id: sccache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-
+            sccache-windows-x64-
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Read and guard the release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' codex-rs/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: $version"
+          # 0.0.0 is DEV_BUILD_VERSION_SENTINEL in windows-sandbox-rs: it selects a
+          # mtime-based helper suffix and marks an unreleased tree. Refuse to ship it.
+          if [ "$version" = "0.0.0" ]; then
+            echo "::error::codex-rs/Cargo.toml still carries the 0.0.0 dev sentinel. Bump it in the release commit."
+            exit 1
+          fi
+
+      # v8's build script creates a directory symlink under target/, which needs
+      # Developer Mode or an elevated shell on Windows, and would otherwise run a
+      # binding generator that wants libclang. Upstream ships prebuilt v8 static
+      # libraries and pre-generated bindings for each target; this in-repo action
+      # downloads and checksums them and exports RUSTY_V8_ARCHIVE and
+      # RUSTY_V8_SRC_BINDING_PATH, which skips both problems.
+      - name: Configure prebuilt rusty_v8
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-pc-windows-msvc
+
+      # Build without --target so artifacts land in codex-rs/target/release,
+      # which is where the package builder looks by default on this host.
+      #
+      # One cargo invocation for every binary, matching upstream's
+      # rust-release-windows.yml. Three separate invocations re-unified features
+      # per call, so shared crates were compiled two or three times (~10 min of
+      # the old 68-minute build step).
+      - name: Build the release binaries
+        working-directory: codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release \
+            --package codex-cli --bin codex \
+            --package codex-windows-sandbox --bins \
+            --package codex-code-mode-host --bin codex-code-mode-host
+
+      # Cache health is deliberately decoupled from job success: actions/cache's
+      # post step only saves on success, and this workflow has downstream steps
+      # (package/verify/publish) that fail independently of the build.
+      - name: Report sccache stats
+        if: always() && !cancelled()
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          stats="$(sccache --show-stats || true)"
+          printf '%s\n' "$stats"
+          {
+            echo "### sccache stats — x86_64-pc-windows-msvc (release)"
+            echo
+            echo '```'
+            printf '%s\n' "$stats"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # A cache that is configured but never hit looks exactly like a cold
+          # build, and that costs an hour every run. Flag it loudly, but never
+          # fail the job: a broken cache must not block a release.
+          if grep -Eq 'errors[[:space:]]+[1-9][0-9]*' <<<"$stats"; then
+            echo "::warning title=sccache cache errors::sccache reported cache errors; the cache backend is probably not working, so builds will stay cold."
+          fi
+          if grep -Eq '^Compile requests[[:space:]]+0$' <<<"$stats"; then
+            echo "::warning title=sccache is not wrapping rustc::sccache saw zero compile requests; RUSTC_WRAPPER is probably not reaching cargo."
+          fi
+
+      - name: Save cargo home cache
+        if: always() && !cancelled() && steps.cargo_home_restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-windows-x64-${{ steps.cachekey.outputs.hash }}
+
+      - name: Save sccache cache
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-${{ github.run_id }}
+
+      - name: Assemble the canonical package directory and the release zip
+        id: assemble
+        shell: bash
+        run: |
+          python scripts/build_codex_package.py \
+            --target x86_64-pc-windows-msvc \
+            --variant codex \
+            --cargo-profile release \
+            --package-dir "$RUNNER_TEMP/vendor/x86_64-pc-windows-msvc" \
+            --archive-output "$RUNNER_TEMP/niu-codex-${{ steps.version.outputs.version }}-windows-x86_64.zip" \
+            --entrypoint-bin "codex-rs/target/release/codex.exe" \
+            --code-mode-host-bin "codex-rs/target/release/codex-code-mode-host.exe" \
+            --codex-command-runner-bin "codex-rs/target/release/codex-command-runner.exe" \
+            --codex-windows-sandbox-setup-bin "codex-rs/target/release/codex-windows-sandbox-setup.exe" \
+            --force
+          # --rg-bin is omitted on purpose: the builder fetches its pinned ripgrep.
+
+      - name: Stage and verify the npm packages
+        shell: bash
+        run: |
+          sh scripts/niu/verify-npm-package.sh \
+            "${{ steps.version.outputs.version }}" \
+            "$RUNNER_TEMP/vendor" \
+            "$RUNNER_TEMP/npm"
+
+      # Runs even when verification fails: the packaged zip is the expensive
+      # part of this job and must stay downloadable for inspection or for a
+      # publish that is retried without a rebuild. Guarded on the assemble step
+      # rather than the build step so a failed build does not report a
+      # misleading "no files found" error here.
+      - name: Upload artifacts
+        if: always() && !cancelled() && steps.assemble.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: niu-codex-${{ steps.version.outputs.version }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/niu-codex-*.zip
+            ${{ runner.temp }}/npm/*.tgz
+
+      - name: Publish to npm
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          platform="$(ls "$RUNNER_TEMP"/npm/cmx666-codex-"$version"-win32-x64.tgz)"
+          meta="$(ls "$RUNNER_TEMP"/npm/cmx666-codex-"$version".tgz)"
+          # Platform first: the meta package depends on it.
+          npm publish "$platform" --tag win32-x64 --access public
+          npm publish "$meta" --tag "${{ inputs.npm_tag }}" --access public
+          echo "published @cmx666/codex@$version (platform: win32-x64, meta tag: ${{ inputs.npm_tag }})"
