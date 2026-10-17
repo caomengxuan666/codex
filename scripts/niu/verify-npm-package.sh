@@ -113,8 +113,15 @@ PLATFORM_TGZ="$(ls "$WORK_DIR"/cmx666-codex-*-"$PLATFORM_TAG".tgz | head -1)"
 [ -n "$META_TGZ" ] && [ -n "$PLATFORM_TGZ" ] || { echo "missing a tarball"; exit 1; }
 (cd "$PROJ" && npm install --omit=optional --no-audit --no-fund "$META_TGZ")
 ALIAS_DIR="$PROJ/node_modules/@cmx666/codex-$PLATFORM_TAG"
-rm -rf "$ALIAS_DIR"; mkdir -p "$ALIAS_DIR"
-tar -xzf "$PLATFORM_TGZ" --strip-components=1 --force-local -C "$ALIAS_DIR"
+# tar on Windows cannot take a native `D:\...` operand: it reads the ':' as a
+# remote host ("Cannot connect to D:") and even with --force-local it chokes on
+# the mixed separators the runner's temp dirs produce. Normalize both operands
+# to the POSIX form this script uses everywhere else.
+to_posix() { if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s' "$1"; fi; }
+PLATFORM_TGZ_POSIX="$(to_posix "$PLATFORM_TGZ")"
+ALIAS_DIR_POSIX="$(to_posix "$ALIAS_DIR")"
+rm -rf "$ALIAS_DIR_POSIX"; mkdir -p "$ALIAS_DIR_POSIX"
+tar -xzf "$PLATFORM_TGZ_POSIX" --strip-components=1 -C "$ALIAS_DIR_POSIX"
 echo "  meta package   : $PROJ/node_modules/@cmx666/codex"
 echo "  platform alias : $ALIAS_DIR ($(find "$ALIAS_DIR" -type f | wc -l) files)"
 echo "  resolved by the launcher:"
