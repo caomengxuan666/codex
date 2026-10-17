@@ -122,18 +122,38 @@ cmd_check() {
   local status=0
   (
     cd "$work/upstream"
-    if git apply --check "$REPO_ROOT/$PATCH_DIR"/*.patch 2>"$work/apply.log"; then
+    # Apply the series in order, one patch at a time. A single `git apply` over
+    # every patch at once cannot work here: two patches in the series may touch
+    # the same file, and the later one's context only exists once the earlier one
+    # has landed.
+    apply_series() {
+      local patch
+      for patch in "$REPO_ROOT/$PATCH_DIR"/*.patch; do
+        git apply ${1:+--3way} "$patch" 2>>"$work/apply.log" || return 1
+      done
+    }
+    reset_tree() {
+      git checkout -- . >/dev/null 2>&1 || true
+      git clean -fdq >/dev/null 2>&1 || true
+    }
+
+    if apply_series; then
       echo "patches apply exactly to $UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
-    elif git apply -3 "$REPO_ROOT/$PATCH_DIR"/*.patch 2>>"$work/apply.log"; then
+    elif { reset_tree; apply_series --3way; }; then
       echo "patches needed a three-way merge against $UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
       echo "(same result a rebase would produce; review the diff below)"
     else
       echo "PATCH CONFLICT against $UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
       status=1
-      # --3way left the tree untouched (apply is atomic). Re-run with --reject so
-      # the hunks that do fit land and the failures are enumerated per file.
-      # --reject cannot be combined with --3way, so this is context-only.
-      git apply --reject "$REPO_ROOT/$PATCH_DIR"/*.patch >>"$work/apply.log" 2>&1 || true
+      # The three-way pass may have left conflict markers behind. Re-run with
+      # --reject so the hunks that do fit land and the failures are enumerated
+      # per file. --reject cannot be combined with --3way, so this is
+      # context-only.
+      reset_tree
+      local patch
+      for patch in "$REPO_ROOT/$PATCH_DIR"/*.patch; do
+        git apply --reject "$patch" >>"$work/apply.log" 2>&1 || true
+      done
       local rejected
       rejected="$(find . -name '*.rej' -not -path './.git/*' | sed 's|^\./||' | sort)"
       if [ -n "$rejected" ]; then
@@ -178,7 +198,9 @@ cmd_pin() {
     echo "branch=$UPSTREAM_BRANCH"
     echo "commit=$base"
     echo "commit_date=$(git show -s --format=%cI "$base")"
-    echo "fork_commits=$(git rev-list --count "$base..HEAD")"
+    # Count only what the series exports: the patches/ artifacts are excluded
+    # from it, so counting them here would make the two drift apart.
+    echo "fork_commits=$(git rev-list --count "$base..HEAD" -- . ':(exclude)patches')"
   } > "$PIN_FILE"
   cat "$PIN_FILE"
 }
