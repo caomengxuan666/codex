@@ -62,16 +62,18 @@ jobs:
           restore-keys: |
             cargo-home-windows-x64-
 
-      # Cache the compiled dependency artifacts directly. An earlier version
-      # wrapped rustc with sccache instead and was measurably worse: sccache
-      # hashes the whole thin-LTO input set and stores the ~300 MB codex-cli
-      # output, and that overhead lands on the longest single step.
+      # Cache the compiled dependency artifacts directly. Read the two exclusions
+      # before adding paths:
       #
-      # What this can buy is bounded by where the time actually goes. In the
-      # unwrapped 68-minute build, ~725 small dependency crates compiled in the
-      # first seven minutes and the final 31 minutes produced no new crate at all
-      # -- that tail is the first-party crates plus the thin-LTO link, which
-      # change every commit and cannot be cached.
+      # - Do NOT cache target/.../release/build. Restoring a build script's
+      #   OUT_DIR alongside a fresh checkout left the v8 crate unable to find its
+      #   `rusty_v8` static library and the build died at the link. Build scripts
+      #   are cheap; let them re-run.
+      # - Do NOT wrap rustc with sccache; it was measurably worse because its
+      #   hashing and storing land on the long thin-LTO link.
+      #
+      # The key carries a version so a cache written by an earlier set of paths
+      # can never be restored.
       - name: Restore build cache
         id: build_cache_restore
         uses: actions/cache/restore@v4
@@ -79,21 +81,23 @@ jobs:
           path: |
             codex-rs/target/x86_64-pc-windows-msvc/release/deps
             codex-rs/target/x86_64-pc-windows-msvc/release/.fingerprint
-            codex-rs/target/x86_64-pc-windows-msvc/release/build
-          key: build-msvc-target-windows-x64-${{ steps.cachekey.outputs.hash }}
+          key: build-msvc-target-windows-x64-v2-${{ steps.cachekey.outputs.hash }}
           restore-keys: |
-            build-msvc-target-windows-x64-
+            build-msvc-target-windows-x64-v2-
 
-      # One cargo invocation for both binaries: separate calls re-unify features
-      # and recompile shared crates from scratch each time. --timings writes the
-      # per-unit breakdown so compile time can be told apart from link time.
+      # Two separate invocations, deliberately: one invocation unifies the feature
+      # sets of both packages and the shared dependency build grows with it.
+      # --timings writes the per-unit breakdown so compile time can be told apart
+      # from link time; each invocation overwrites the file, so keep a copy.
       - name: Build Codex CLI and sandbox helpers
         id: build
         shell: pwsh
         run: |
-          cargo build --target x86_64-pc-windows-msvc --release --timings `
-            --package codex-cli --bin codex `
-            --package codex-windows-sandbox --bins
+          $timings = "target/cargo-timings"
+          cargo build --target x86_64-pc-windows-msvc --release --timings --package codex-cli --bin codex
+          Copy-Item "$timings/cargo-timing.html" "$timings/timings-1-codex-cli.html"
+          cargo build --target x86_64-pc-windows-msvc --release --timings --package codex-windows-sandbox --bins
+          Copy-Item "$timings/cargo-timing.html" "$timings/timings-2-sandbox.html"
 
       - name: Upload Cargo timings
         if: always() && !cancelled()
@@ -101,9 +105,9 @@ jobs:
         with:
           name: cargo-timings-niu-windows-x64-preview
           # uses: steps resolve from the repo root, not from the job's
-          # defaults.run.working-directory. cargo may write this under the target
+          # defaults.run.working-directory. cargo may write these under the target
           # triple directory, so glob for it.
-          path: codex-rs/target/**/cargo-timings/cargo-timing.html
+          path: codex-rs/target/**/cargo-timings/*.html
           if-no-files-found: warn
 
       - name: Save cargo home cache
@@ -129,8 +133,7 @@ jobs:
           path: |
             codex-rs/target/x86_64-pc-windows-msvc/release/deps
             codex-rs/target/x86_64-pc-windows-msvc/release/.fingerprint
-            codex-rs/target/x86_64-pc-windows-msvc/release/build
-          key: build-msvc-target-windows-x64-${{ steps.cachekey.outputs.hash }}
+          key: build-msvc-target-windows-x64-v2-${{ steps.cachekey.outputs.hash }}
 
       - name: Stage zip
         shell: pwsh
