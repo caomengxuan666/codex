@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: caomengxuan666 <2507560089@qq.com>
 Date: Sat, 17 Oct 2026 15:17:43 +0800
-Subject: [PATCH 2/5] feat(niu): apply the fork's npm, CI and script delta on
+Subject: [PATCH 2/6] feat(niu): apply the fork's npm, CI and script delta on
  the new base
 
 Everything the fork owns outside codex-rs is either new upstream (the niu

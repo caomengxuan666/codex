@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: caomengxuan666 <2507560089@qq.com>
 Date: Sat, 17 Oct 2026 15:49:17 +0800
-Subject: [PATCH 4/5] fix(niu): exclude the patch artifacts from the exported
+Subject: [PATCH 4/6] fix(niu): exclude the patch artifacts from the exported
  series
 
 `export` ran `git format-patch upstream/main..HEAD` over the whole tree, and

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: caomengxuan666 <2507560089@qq.com>
 Date: Sat, 17 Oct 2026 15:47:26 +0800
-Subject: [PATCH 3/5] fix(niu): cover Niu in the unix-only shell matches and
+Subject: [PATCH 3/6] fix(niu): cover Niu in the unix-only shell matches and
  pin the wrapper boundary
 
 Adding a ShellType variant only breaks builds on platforms that compile the

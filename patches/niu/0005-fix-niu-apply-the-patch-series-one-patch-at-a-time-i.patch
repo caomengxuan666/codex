@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: caomengxuan666 <2507560089@qq.com>
 Date: Sat, 17 Oct 2026 15:55:08 +0800
-Subject: [PATCH 5/5] fix(niu): apply the patch series one patch at a time in
+Subject: [PATCH 5/6] fix(niu): apply the patch series one patch at a time in
  `check`
 
 `check` handed the whole series to a single `git apply --check`, then to a single

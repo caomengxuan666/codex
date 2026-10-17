@@ -1,0 +1,423 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: caomengxuan666 <2507560089@qq.com>
+Date: Sat, 17 Oct 2026 16:17:17 +0800
+Subject: [PATCH 6/6] perf(ci): drop sccache and cache the release dependencies
+ directly
+
+The sccache approach was measured and is a regression, so remove it rather than
+tune it. Run 39008835942 (sccache on the local disk cache, 4G) was cancelled at
+1h55m still inside "Build the release binaries"; the unwrapped run 38998544353
+finished its build in 68 minutes. Neither sccache nor its configuration failed:
+the log shows `SCCACHE_BACKEND: disk` and RUSTC_WRAPPER pointing at sccache.exe
+with no cache errors. It was simply slower.
+
+Where the time goes, from the unwrapped run's log:
+
+- ~725 dependency crates compiled between 03:24:33 and 03:31, about seven minutes.
+- The next ~290 crates started between 03:31 and 03:51.
+- From 03:51 until `Finished` at 04:22:22 -- 31 minutes -- no new crate started.
+
+That last window is the first-party crates plus the `lto = "thin"` link, which
+change on every commit. sccache has to hash the whole thin-LTO input set and
+store the ~300 MB codex-cli output for that step, so its overhead lands squarely
+on the longest single unit of work. Hence the regression.
+
+What replaces it: cache the compiled dependency artifacts under
+`codex-rs/target/release` (deps, .fingerprint, build) with actions/cache, keyed
+on the lockfile, toolchain and rustc flags -- never on the source, so a new
+commit still hits it and cargo's fingerprints decide what to rebuild. Save only
+after a successful build and only on a miss, because an exact key can never be
+overwritten and a partial tree saved under it would be permanent.
+
+This is expected to recover the dependency portion only, not the hour. To stop
+guessing about the rest, the build now runs with `--timings` and uploads
+cargo-timing.html, matching what the repo's own release workflow does. The next
+run's artifact will say how much is compile and how much is link.
+---
+ .github/workflows/niu-codex-npm-release.yml   | 145 +++++++-----------
+ .github/workflows/niu-codex-windows-build.yml | 128 ++++++----------
+ 2 files changed, 101 insertions(+), 172 deletions(-)
+
+diff --git a/.github/workflows/niu-codex-npm-release.yml b/.github/workflows/niu-codex-npm-release.yml
+index 8554865ec1..977ee29adc 100644
+--- a/.github/workflows/niu-codex-npm-release.yml
++++ b/.github/workflows/niu-codex-npm-release.yml
+@@ -11,13 +11,13 @@ name: niu-codex-npm-release
+ # to get wrong.
+ #
+ # Caching: the codex-cli release build is ~59 minutes cold on a windows-latest
+-# runner, so it must never be cold twice. Compiled objects go through sccache's
+-# local disk cache, which the workflow persists with actions/cache, and the
+-# cargo home is cached separately. `target/` itself is deliberately NOT cached:
+-# it is 8 GB+ here, which does not fit GitHub's 10 GB per-repo cache budget.
+-# Every cache save is `if: always()` because actions/cache's default post step
+-# only saves on job success, and the package/verify/publish steps at the end of
+-# this job can fail on their own.
++# runner. The cargo home and the compiled dependency artifacts under
++# `codex-rs/target/release` are restored with actions/cache and saved explicitly
++# with `if: always()`, because actions/cache's own post step only saves on job
++# success and the package/verify/publish steps at the end of this job fail on
++# their own. Do not cache `target/` as a whole: only the release dependency
++# directories are used, and a whole-target entry competes with the Bazel caches
++# for the same 10 GB repo budget.
+ #
+ # Publish order matters. The meta package ships only bin/codex.js; its binaries
+ # arrive through optionalDependencies as `npm:@cmx666/codex@<version>-win32-x64`.
+@@ -56,14 +56,6 @@ jobs:
+     env:
+       # Incremental artifacts are useless across CI jobs and only inflate the cache.
+       CARGO_INCREMENTAL: "0"
+-      # sccache caches compiled crates in a local directory that the workflow
+-      # persists with actions/cache. Keep the budget well under GitHub's 10 GB
+-      # per-repo limit, which the Bazel caches also draw on, so a single cache
+-      # entry cannot evict them.
+-      SCCACHE_CACHE_SIZE: 4G
+-      # Surface sccache's own warnings. Without this a broken cache degrades
+-      # every build to a cold one without saying so.
+-      SCCACHE_LOG: warn
+     steps:
+       - uses: actions/checkout@v4
+ 
+@@ -71,10 +63,10 @@ jobs:
+         with:
+           targets: x86_64-pc-windows-msvc
+ 
+-      # Compiled objects live in sccache, not in `target/`. A whole-`target`
+-      # cache entry is 8 GB+ for this workspace, which does not fit GitHub's
+-      # 10 GB per-repo cache budget and evicts the Bazel caches when it is
+-      # saved. Only the cargo home (small) is cached as a directory.
++      # Cache keys cover what changes the *dependency* build: the lockfile, the
++      # toolchain and the rustflags in .cargo/config.toml. Source changes must not
++      # be part of the key, so that a new commit still hits this cache -- cargo's
++      # own fingerprints decide what to rebuild from it.
+       - name: Compute cache key
+         id: cachekey
+         shell: bash
+@@ -94,49 +86,30 @@ jobs:
+           restore-keys: |
+             cargo-home-windows-x64-
+ 
+-      # sccache intentionally uses its local disk cache only. Its GitHub Actions
+-      # cache backend is unusable from here: `run` steps on this runner never
+-      # receive ACTIONS_CACHE_URL / ACTIONS_RUNTIME_TOKEN (verified 2026-10-17,
+-      # all four cache variables empty), and sccache treats the missing endpoint
+-      # as a fatal server startup error ("cache url for ghac not found") instead
+-      # of degrading, so requesting ghac would kill the release build. ghac also
+-      # drops writes on HTTP 429 without retrying (mozilla/sccache#2821).
++      # Cache the compiled dependency artifacts directly. An earlier version
++      # wrapped rustc with sccache instead and was measurably worse: sccache
++      # hashes the whole thin-LTO input set and stores the ~300 MB codex-cli
++      # output, and that overhead lands on the longest single step. Measured
++      # 2026-10-17: 115+ minutes and still unfinished against 68 minutes without
++      # the wrapper. Do not reintroduce it without new measurements.
+       #
+-      # The version belongs in `tool`: taiki-e/install-action has no `version`
+-      # input and silently installs latest when one is passed. Pinned rather than
+-      # floating so the on-disk cache format is stable. 0.18.0's open panic is
+-      # x64 Linux only (mozilla/sccache#2869); this runner is Windows x64.
+-      - name: Install sccache
+-        uses: taiki-e/install-action@v2
+-        with:
+-          tool: sccache@0.18.0
+-
+-      - name: Point sccache at a cacheable directory and wrap rustc
+-        shell: bash
+-        run: |
+-          set -euo pipefail
+-          sccache_dir="${RUNNER_TEMP}/sccache"
+-          wrapper="$(command -v sccache)"
+-          if [[ "${RUNNER_OS}" == "Windows" ]] && command -v cygpath >/dev/null 2>&1; then
+-            # sccache and actions/cache both take native paths on Windows.
+-            sccache_dir="$(cygpath -w "${sccache_dir}")"
+-            wrapper="$(cygpath -w "${wrapper}")"
+-          fi
+-          echo "SCCACHE_DIR=${sccache_dir}" >> "$GITHUB_ENV"
+-          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+-          echo "CARGO_BUILD_RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+-          echo "SCCACHE_DIR=${sccache_dir}"
+-          echo "RUSTC_WRAPPER=${wrapper}"
+-
+-      - name: Restore sccache cache
+-        id: sccache_restore
++      # What this can buy is bounded by where the time actually goes. In the
++      # unwrapped 68-minute build, ~725 small dependency crates compiled in the
++      # first seven minutes and the final 31 minutes produced no new crate at all
++      # -- that tail is the first-party crates plus the thin-LTO link, which
++      # change every commit and cannot be cached. Expect the dependency portion
++      # back, not the hour.
++      - name: Restore build cache
++        id: build_cache_restore
+         uses: actions/cache/restore@v4
+         with:
+-          path: ${{ env.SCCACHE_DIR }}
+-          key: sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-${{ github.run_id }}
++          path: |
++            codex-rs/target/release/deps
++            codex-rs/target/release/.fingerprint
++            codex-rs/target/release/build
++          key: build-windows-x64-${{ steps.cachekey.outputs.hash }}
+           restore-keys: |
+-            sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-
+-            sccache-windows-x64-
++            build-windows-x64-
+ 
+       - uses: actions/setup-node@v4
+         with:
+@@ -177,42 +150,29 @@ jobs:
+       # per call, so shared crates were compiled two or three times (~10 min of
+       # the old 68-minute build step).
+       - name: Build the release binaries
++        id: build
+         working-directory: codex-rs
+         shell: bash
+         run: |
+           set -euo pipefail
+-          cargo build --release \
++          cargo build --release --timings \
+             --package codex-cli --bin codex \
+             --package codex-windows-sandbox --bins \
+             --package codex-code-mode-host --bin codex-code-mode-host
+ 
+-      # Cache health is deliberately decoupled from job success: actions/cache's
+-      # post step only saves on success, and this workflow has downstream steps
+-      # (package/verify/publish) that fail independently of the build.
+-      - name: Report sccache stats
++      # --timings writes the per-unit breakdown to
++      # target/cargo-timings/cargo-timing.html. The repo's own release workflow
++      # uploads the same file, and it is the only way to separate compile time
++      # from link time here without guessing. Costs one artifact.
++      - name: Upload Cargo timings
+         if: always() && !cancelled()
+-        shell: bash
+-        continue-on-error: true
+-        run: |
+-          set -euo pipefail
+-          stats="$(sccache --show-stats || true)"
+-          printf '%s\n' "$stats"
+-          {
+-            echo "### sccache stats — x86_64-pc-windows-msvc (release)"
+-            echo
+-            echo '```'
+-            printf '%s\n' "$stats"
+-            echo '```'
+-          } >> "$GITHUB_STEP_SUMMARY"
+-          # A cache that is configured but never hit looks exactly like a cold
+-          # build, and that costs an hour every run. Flag it loudly, but never
+-          # fail the job: a broken cache must not block a release.
+-          if grep -Eq 'errors[[:space:]]+[1-9][0-9]*' <<<"$stats"; then
+-            echo "::warning title=sccache cache errors::sccache reported cache errors; the cache backend is probably not working, so builds will stay cold."
+-          fi
+-          if grep -Eq '^Compile requests[[:space:]]+0$' <<<"$stats"; then
+-            echo "::warning title=sccache is not wrapping rustc::sccache saw zero compile requests; RUSTC_WRAPPER is probably not reaching cargo."
+-          fi
++        uses: actions/upload-artifact@v4
++        with:
++          name: cargo-timings-niu-windows-x64
++          # cargo may write this under the target triple directory, so glob for
++          # it; upstream's rust-release.yml does the same.
++          path: codex-rs/target/**/cargo-timings/cargo-timing.html
++          if-no-files-found: warn
+ 
+       - name: Save cargo home cache
+         if: always() && !cancelled() && steps.cargo_home_restore.outputs.cache-hit != 'true'
+@@ -225,13 +185,20 @@ jobs:
+             ~/.cargo/git/db/
+           key: cargo-home-windows-x64-${{ steps.cachekey.outputs.hash }}
+ 
+-      - name: Save sccache cache
+-        if: always() && !cancelled()
++      # Save only after a successful build, and only on a miss. Saving a partial
++      # dependency tree under the lockfile key would make it permanent: an exact
++      # key can never be overwritten, so the cache would stay incomplete for the
++      # life of that lockfile.
++      - name: Save build cache
++        if: always() && !cancelled() && steps.build.outcome == 'success' && steps.build_cache_restore.outputs.cache-hit != 'true'
+         continue-on-error: true
+         uses: actions/cache/save@v4
+         with:
+-          path: ${{ env.SCCACHE_DIR }}
+-          key: sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-${{ github.run_id }}
++          path: |
++            codex-rs/target/release/deps
++            codex-rs/target/release/.fingerprint
++            codex-rs/target/release/build
++          key: build-windows-x64-${{ steps.cachekey.outputs.hash }}
+ 
+       - name: Assemble the canonical package directory and the release zip
+         id: assemble
+diff --git a/.github/workflows/niu-codex-windows-build.yml b/.github/workflows/niu-codex-windows-build.yml
+index e502b6763f..928ad6099f 100644
+--- a/.github/workflows/niu-codex-windows-build.yml
++++ b/.github/workflows/niu-codex-windows-build.yml
+@@ -28,14 +28,6 @@ jobs:
+     env:
+       # Incremental artifacts are useless across CI jobs and only inflate the cache.
+       CARGO_INCREMENTAL: "0"
+-      # sccache caches compiled crates in a local directory that the workflow
+-      # persists with actions/cache. Keep the budget well under GitHub's 10 GB
+-      # per-repo limit, which the Bazel caches also draw on, so a single cache
+-      # entry cannot evict them.
+-      SCCACHE_CACHE_SIZE: 4G
+-      # Surface sccache's own warnings. Without this a broken cache degrades
+-      # every build to a cold one without saying so.
+-      SCCACHE_LOG: warn
+     defaults:
+       run:
+         working-directory: codex-rs
+@@ -47,10 +39,10 @@ jobs:
+         with:
+           targets: x86_64-pc-windows-msvc
+ 
+-      # Compiled objects live in sccache, not in `target/`. A whole-`target`
+-      # cache entry is 8 GB+ for this workspace, which does not fit GitHub's
+-      # 10 GB per-repo cache budget and evicts the Bazel caches when it is
+-      # saved. Only the cargo home (small) is cached as a directory.
++      # Cache keys cover what changes the *dependency* build: the lockfile, the
++      # toolchain and the rustflags in .cargo/config.toml. Source changes must not
++      # be part of the key, so that a new commit still hits this cache -- cargo's
++      # own fingerprints decide what to rebuild from it.
+       - name: Compute cache key
+         id: cachekey
+         shell: bash
+@@ -70,86 +62,49 @@ jobs:
+           restore-keys: |
+             cargo-home-windows-x64-
+ 
+-      # sccache intentionally uses its local disk cache only. Its GitHub Actions
+-      # cache backend is unusable from here: `run` steps on this runner never
+-      # receive ACTIONS_CACHE_URL / ACTIONS_RUNTIME_TOKEN (verified 2026-10-17,
+-      # all four cache variables empty), and sccache treats the missing endpoint
+-      # as a fatal server startup error ("cache url for ghac not found") instead
+-      # of degrading, so requesting ghac would kill the build. ghac also drops
+-      # writes on HTTP 429 without retrying (mozilla/sccache#2821).
++      # Cache the compiled dependency artifacts directly. An earlier version
++      # wrapped rustc with sccache instead and was measurably worse: sccache
++      # hashes the whole thin-LTO input set and stores the ~300 MB codex-cli
++      # output, and that overhead lands on the longest single step.
+       #
+-      # The version belongs in `tool`: taiki-e/install-action has no `version`
+-      # input and silently installs latest when one is passed. Pinned rather than
+-      # floating so the on-disk cache format is stable. 0.18.0's open panic is
+-      # x64 Linux only (mozilla/sccache#2869); this runner is Windows x64.
+-      - name: Install sccache
+-        uses: taiki-e/install-action@v2
+-        with:
+-          tool: sccache@0.18.0
+-
+-      - name: Point sccache at a cacheable directory and wrap rustc
+-        shell: bash
+-        run: |
+-          set -euo pipefail
+-          sccache_dir="${RUNNER_TEMP}/sccache"
+-          wrapper="$(command -v sccache)"
+-          if [[ "${RUNNER_OS}" == "Windows" ]] && command -v cygpath >/dev/null 2>&1; then
+-            # sccache and actions/cache both take native paths on Windows.
+-            sccache_dir="$(cygpath -w "${sccache_dir}")"
+-            wrapper="$(cygpath -w "${wrapper}")"
+-          fi
+-          echo "SCCACHE_DIR=${sccache_dir}" >> "$GITHUB_ENV"
+-          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+-          echo "CARGO_BUILD_RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+-          echo "SCCACHE_DIR=${sccache_dir}"
+-          echo "RUSTC_WRAPPER=${wrapper}"
+-
+-      - name: Restore sccache cache
+-        id: sccache_restore
++      # What this can buy is bounded by where the time actually goes. In the
++      # unwrapped 68-minute build, ~725 small dependency crates compiled in the
++      # first seven minutes and the final 31 minutes produced no new crate at all
++      # -- that tail is the first-party crates plus the thin-LTO link, which
++      # change every commit and cannot be cached.
++      - name: Restore build cache
++        id: build_cache_restore
+         uses: actions/cache/restore@v4
+         with:
+-          path: ${{ env.SCCACHE_DIR }}
+-          key: sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-${{ github.run_id }}
++          path: |
++            codex-rs/target/x86_64-pc-windows-msvc/release/deps
++            codex-rs/target/x86_64-pc-windows-msvc/release/.fingerprint
++            codex-rs/target/x86_64-pc-windows-msvc/release/build
++          key: build-msvc-target-windows-x64-${{ steps.cachekey.outputs.hash }}
+           restore-keys: |
+-            sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-
+-            sccache-windows-x64-
++            build-msvc-target-windows-x64-
+ 
+       # One cargo invocation for both binaries: separate calls re-unify features
+-      # and recompile shared crates from scratch each time.
++      # and recompile shared crates from scratch each time. --timings writes the
++      # per-unit breakdown so compile time can be told apart from link time.
+       - name: Build Codex CLI and sandbox helpers
++        id: build
+         shell: pwsh
+         run: |
+-          cargo build --target x86_64-pc-windows-msvc --release `
++          cargo build --target x86_64-pc-windows-msvc --release --timings `
+             --package codex-cli --bin codex `
+             --package codex-windows-sandbox --bins
+ 
+-      # Cache health is deliberately decoupled from job success: actions/cache's
+-      # post step only saves on success, and this workflow has downstream steps
+-      # (stage/upload/release) that fail independently of the build.
+-      - name: Report sccache stats
++      - name: Upload Cargo timings
+         if: always() && !cancelled()
+-        shell: bash
+-        continue-on-error: true
+-        run: |
+-          set -euo pipefail
+-          stats="$(sccache --show-stats || true)"
+-          printf '%s\n' "$stats"
+-          {
+-            echo "### sccache stats — x86_64-pc-windows-msvc (release)"
+-            echo
+-            echo '```'
+-            printf '%s\n' "$stats"
+-            echo '```'
+-          } >> "$GITHUB_STEP_SUMMARY"
+-          # A cache that is configured but never hit looks exactly like a cold
+-          # build, and that costs an hour every run. Flag it loudly, but never
+-          # fail the job: a broken cache must not block a release.
+-          if grep -Eq 'errors[[:space:]]+[1-9][0-9]*' <<<"$stats"; then
+-            echo "::warning title=sccache cache errors::sccache reported cache errors; the cache backend is probably not working, so builds will stay cold."
+-          fi
+-          if grep -Eq '^Compile requests[[:space:]]+0$' <<<"$stats"; then
+-            echo "::warning title=sccache is not wrapping rustc::sccache saw zero compile requests; RUSTC_WRAPPER is probably not reaching cargo."
+-          fi
++        uses: actions/upload-artifact@v4
++        with:
++          name: cargo-timings-niu-windows-x64-preview
++          # uses: steps resolve from the repo root, not from the job's
++          # defaults.run.working-directory. cargo may write this under the target
++          # triple directory, so glob for it.
++          path: codex-rs/target/**/cargo-timings/cargo-timing.html
++          if-no-files-found: warn
+ 
+       - name: Save cargo home cache
+         if: always() && !cancelled() && steps.cargo_home_restore.outputs.cache-hit != 'true'
+@@ -162,13 +117,20 @@ jobs:
+             ~/.cargo/git/db/
+           key: cargo-home-windows-x64-${{ steps.cachekey.outputs.hash }}
+ 
+-      - name: Save sccache cache
+-        if: always() && !cancelled()
++      # Save only after a successful build, and only on a miss. Saving a partial
++      # dependency tree under the lockfile key would make it permanent: an exact
++      # key can never be overwritten, so the cache would stay incomplete for the
++      # life of that lockfile.
++      - name: Save build cache
++        if: always() && !cancelled() && steps.build.outcome == 'success' && steps.build_cache_restore.outputs.cache-hit != 'true'
+         continue-on-error: true
+         uses: actions/cache/save@v4
+         with:
+-          path: ${{ env.SCCACHE_DIR }}
+-          key: sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-${{ github.run_id }}
++          path: |
++            codex-rs/target/x86_64-pc-windows-msvc/release/deps
++            codex-rs/target/x86_64-pc-windows-msvc/release/.fingerprint
++            codex-rs/target/x86_64-pc-windows-msvc/release/build
++          key: build-msvc-target-windows-x64-${{ steps.cachekey.outputs.hash }}
+ 
+       - name: Stage zip
+         shell: pwsh

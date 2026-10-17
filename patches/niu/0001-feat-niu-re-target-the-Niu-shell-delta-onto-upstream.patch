@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: caomengxuan666 <2507560089@qq.com>
 Date: Sat, 17 Oct 2026 15:03:59 +0800
-Subject: [PATCH 1/5] feat(niu): re-target the Niu shell delta onto upstream
+Subject: [PATCH 1/6] feat(niu): re-target the Niu shell delta onto upstream
  ce0323f2f2
 
 The fork was pinned to upstream 2230d64464 (2026-08-12) and had drifted 3180
