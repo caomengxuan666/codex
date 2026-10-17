@@ -113,15 +113,39 @@ PLATFORM_TGZ="$(ls "$WORK_DIR"/cmx666-codex-*-"$PLATFORM_TAG".tgz | head -1)"
 [ -n "$META_TGZ" ] && [ -n "$PLATFORM_TGZ" ] || { echo "missing a tarball"; exit 1; }
 (cd "$PROJ" && npm install --omit=optional --no-audit --no-fund "$META_TGZ")
 ALIAS_DIR="$PROJ/node_modules/@cmx666/codex-$PLATFORM_TAG"
-# tar on Windows cannot take a native `D:\...` operand: it reads the ':' as a
-# remote host ("Cannot connect to D:") and even with --force-local it chokes on
-# the mixed separators the runner's temp dirs produce. Normalize both operands
-# to the POSIX form this script uses everywhere else.
-to_posix() { if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s' "$1"; fi; }
-PLATFORM_TGZ_POSIX="$(to_posix "$PLATFORM_TGZ")"
-ALIAS_DIR_POSIX="$(to_posix "$ALIAS_DIR")"
-rm -rf "$ALIAS_DIR_POSIX"; mkdir -p "$ALIAS_DIR_POSIX"
-tar -xzf "$PLATFORM_TGZ_POSIX" --strip-components=1 -C "$ALIAS_DIR_POSIX"
+# Unpack with Python's tarfile, not tar. On Windows the runner's temp dir is a
+# native `D:\a\_temp` path, and tar reads the drive colon as a remote host
+# ("Cannot connect to D:"). --force-local and cygpath normalization both still
+# trip over the mixed separators Git Bash produces from `$RUNNER_TEMP/...`.
+# tarfile takes the path natively and is already a dependency of this script.
+rm -rf "$ALIAS_DIR"
+python - "$PLATFORM_TGZ" "$ALIAS_DIR" <<'PY'
+import os
+import shutil
+import sys
+import tarfile
+
+tgz, dest = sys.argv[1], sys.argv[2]
+os.makedirs(dest, exist_ok=True)
+with tarfile.open(tgz) as archive:
+    for member in archive.getmembers():
+        # npm tarballs are rooted at `package/`; the tar call this replaces
+        # used --strip-components=1 to drop that level.
+        if not member.name.startswith("package/"):
+            continue
+        relative = member.name[len("package/"):]
+        if not relative:
+            continue
+        target = os.path.join(dest, *relative.split("/"))
+        if member.isdir():
+            os.makedirs(target, exist_ok=True)
+        elif member.isfile():
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with archive.extractfile(member) as source, open(target, "wb") as output:
+                shutil.copyfileobj(source, output)
+        else:
+            print(f"  skipping non-file member: {member.name}")
+PY
 echo "  meta package   : $PROJ/node_modules/@cmx666/codex"
 echo "  platform alias : $ALIAS_DIR ($(find "$ALIAS_DIR" -type f | wc -l) files)"
 echo "  resolved by the launcher:"
