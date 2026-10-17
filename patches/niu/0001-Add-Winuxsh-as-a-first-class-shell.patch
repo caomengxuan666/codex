@@ -1,0 +1,669 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: caomengxuan666 <2507560089@qq.com>
+Date: Fri, 7 Aug 2026 19:10:39 +0800
+Subject: [PATCH 1/7] Add Winuxsh as a first-class shell
+
+---
+ .../src/protocol/v2/environment.rs            |  2 +-
+ codex-rs/apply-patch/src/invocation.rs        | 11 +++
+ .../src/command_canonicalization_tests.rs     | 19 +++++
+ codex-rs/core/src/exec_policy.rs              | 10 +++
+ codex-rs/core/src/exec_policy_tests.rs        |  7 ++
+ codex-rs/core/src/shell.rs                    | 31 ++++++++
+ codex-rs/core/src/shell_snapshot.rs           | 14 +++-
+ codex-rs/core/src/shell_snapshot_tests.rs     | 10 +++
+ codex-rs/core/src/shell_tests.rs              | 13 ++++
+ .../core/src/tools/handlers/shell_spec.rs     |  3 +-
+ .../src/tools/handlers/shell_spec_tests.rs    |  2 +-
+ codex-rs/core/src/tools/mod.rs                |  1 +
+ .../docs/winuxsh-first-class-shell-plan.md    | 46 ++++++++++++
+ codex-rs/exec-server-protocol/src/protocol.rs |  2 +-
+ codex-rs/shell-command/src/bash.rs            | 32 +++++++--
+ .../command_safety/is_dangerous_command.rs    |  9 +++
+ .../src/command_safety/is_safe_command.rs     | 14 ++++
+ codex-rs/shell-command/src/parse_command.rs   | 15 ++++
+ codex-rs/shell-command/src/shell_detect.rs    | 72 ++++++++++++++++++-
+ codex-rs/tools/src/tool_config.rs             |  1 +
+ 20 files changed, 302 insertions(+), 12 deletions(-)
+ create mode 100644 codex-rs/docs/winuxsh-first-class-shell-plan.md
+
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/environment.rs b/codex-rs/app-server-protocol/src/protocol/v2/environment.rs
+index 4351199224..d89bcf3db9 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/environment.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/environment.rs
+@@ -94,7 +94,7 @@ pub enum EnvironmentStatusKind {
+ #[serde(rename_all = "camelCase")]
+ #[ts(export_to = "v2/")]
+ pub struct EnvironmentShellInfo {
+-    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, or `cmd`.
++    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, `cmd`, or `winuxsh`.
+     pub name: String,
+     /// Target-native shell executable path or command name.
+     pub path: String,
+diff --git a/codex-rs/apply-patch/src/invocation.rs b/codex-rs/apply-patch/src/invocation.rs
+index 8ac2084e4f..a74086b9ff 100644
+--- a/codex-rs/apply-patch/src/invocation.rs
++++ b/codex-rs/apply-patch/src/invocation.rs
+@@ -62,6 +62,7 @@ fn classify_shell_name(shell: &str, convention: PathConvention) -> Option<String
+ fn classify_shell(shell: &str, flag: &str, convention: PathConvention) -> Option<ApplyPatchShell> {
+     classify_shell_name(shell, convention).and_then(|name| match name.as_str() {
+         "bash" | "zsh" | "sh" if matches!(flag, "-lc" | "-c") => Some(ApplyPatchShell::Unix),
++        "winuxsh" if matches!(flag, "-C" | "--repl-command" | "-c") => Some(ApplyPatchShell::Unix),
+         "pwsh" | "powershell" if flag.eq_ignore_ascii_case("-command") => {
+             Some(ApplyPatchShell::PowerShell)
+         }
+@@ -416,6 +417,10 @@ mod tests {
+         strs_to_strings(&["bash", "-lc", script])
+     }
+ 
++    fn args_winuxsh(script: &str) -> Vec<String> {
++        strs_to_strings(&["winuxsh.exe", "-C", script])
++    }
++
+     fn args_powershell(script: &str) -> Vec<String> {
+         strs_to_strings(&["powershell.exe", "-Command", script])
+     }
+@@ -594,6 +599,12 @@ mod tests {
+         assert_match_args(args, /*expected_workdir*/ None);
+     }
+ 
++    #[tokio::test]
++    async fn test_winuxsh_heredoc() {
++        let script = heredoc_script("cd foo && ");
++        assert_match_args(args_winuxsh(&script), Some("foo"));
++    }
++
+     #[tokio::test]
+     async fn test_heredoc_applypatch() {
+         let args = strs_to_strings(&[
+diff --git a/codex-rs/core/src/command_canonicalization_tests.rs b/codex-rs/core/src/command_canonicalization_tests.rs
+index c278dedafc..2f2ac79d30 100644
+--- a/codex-rs/core/src/command_canonicalization_tests.rs
++++ b/codex-rs/core/src/command_canonicalization_tests.rs
+@@ -53,6 +53,25 @@ fn canonicalizes_heredoc_scripts_to_stable_script_key() {
+     );
+ }
+ 
++#[test]
++fn canonicalizes_winuxsh_scripts_like_other_bash_like_shells() {
++    let command = vec![
++        "winuxsh.exe".to_string(),
++        "-C".to_string(),
++        "cargo test -p codex-core".to_string(),
++    ];
++
++    assert_eq!(
++        canonicalize_command_for_approval(&command),
++        vec![
++            "cargo".to_string(),
++            "test".to_string(),
++            "-p".to_string(),
++            "codex-core".to_string(),
++        ]
++    );
++}
++
+ #[test]
+ fn canonicalizes_powershell_wrappers_to_stable_script_key() {
+     let script = "Write-Host hi";
+diff --git a/codex-rs/core/src/exec_policy.rs b/codex-rs/core/src/exec_policy.rs
+index c065917d41..2262dcf123 100644
+--- a/codex-rs/core/src/exec_policy.rs
++++ b/codex-rs/core/src/exec_policy.rs
+@@ -138,6 +138,16 @@ pub(crate) static BANNED_PREFIX_SUGGESTIONS: &[&[&str]] = &[
+     &["zsh"],
+     &["zsh", "-c"],
+     &["zsh", "-lc"],
++    &["winuxsh"],
++    &["winuxsh", "-C"],
++    &["winuxsh", "-c"],
++    &["winuxsh", "-lc"],
++    &["winuxsh", "--repl-command"],
++    &["winuxsh.exe"],
++    &["winuxsh.exe", "-C"],
++    &["winuxsh.exe", "-c"],
++    &["winuxsh.exe", "-lc"],
++    &["winuxsh.exe", "--repl-command"],
+ ];
+ 
+ /// Describes which unmatched-command heuristics should classify the command
+diff --git a/codex-rs/core/src/exec_policy_tests.rs b/codex-rs/core/src/exec_policy_tests.rs
+index 518cf8d8af..6b2afe0dd0 100644
+--- a/codex-rs/core/src/exec_policy_tests.rs
++++ b/codex-rs/core/src/exec_policy_tests.rs
+@@ -1937,6 +1937,13 @@ fn derive_requested_execpolicy_amendment_returns_none_for_shell_and_powershell_v
+         vec!["sh".to_string(), "-c".to_string()],
+         vec!["sh".to_string(), "-lc".to_string()],
+         vec!["zsh".to_string(), "-lc".to_string()],
++        vec!["winuxsh".to_string()],
++        vec!["winuxsh".to_string(), "-C".to_string()],
++        vec!["winuxsh".to_string(), "-c".to_string()],
++        vec!["winuxsh".to_string(), "--repl-command".to_string()],
++        vec!["winuxsh.exe".to_string(), "-C".to_string()],
++        vec!["winuxsh.exe".to_string(), "-c".to_string()],
++        vec!["winuxsh.exe".to_string(), "--repl-command".to_string()],
+         vec!["/bin/bash".to_string(), "-lc".to_string()],
+         vec!["/bin/zsh".to_string(), "-lc".to_string()],
+         vec!["pwsh".to_string()],
+diff --git a/codex-rs/core/src/shell.rs b/codex-rs/core/src/shell.rs
+index ccd1ea20d2..51bf0f8b09 100644
+--- a/codex-rs/core/src/shell.rs
++++ b/codex-rs/core/src/shell.rs
+@@ -29,6 +29,14 @@ impl Shell {
+                     command.to_string(),
+                 ]
+             }
++            ShellType::Winuxsh => {
++                let arg = if use_login_shell { "-C" } else { "-c" };
++                vec![
++                    self.shell_path.to_string_lossy().to_string(),
++                    arg.to_string(),
++                    command.to_string(),
++                ]
++            }
+             ShellType::PowerShell => {
+                 let mut args = vec![self.shell_path.to_string_lossy().to_string()];
+                 if !use_login_shell {
+@@ -66,6 +74,7 @@ impl Shell {
+             "powershell" => ShellType::PowerShell,
+             "sh" => ShellType::Sh,
+             "cmd" => ShellType::Cmd,
++            "winuxsh" => ShellType::Winuxsh,
+             name => anyhow::bail!("unknown environment shell `{name}`"),
+         };
+ 
+@@ -93,6 +102,28 @@ pub fn default_user_shell() -> Shell {
+     codex_shell_command::shell_detect::default_user_shell().into()
+ }
+ 
++#[cfg(test)]
++mod platform_independent_tests {
++    use super::*;
++
++    #[test]
++    fn winuxsh_uses_profile_and_no_profile_exec_args() {
++        let shell = Shell {
++            shell_type: ShellType::Winuxsh,
++            shell_path: PathBuf::from("winuxsh.exe"),
++        };
++
++        assert_eq!(
++            shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
++            vec!["winuxsh.exe", "-c", "echo hello"]
++        );
++        assert_eq!(
++            shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
++            vec!["winuxsh.exe", "-C", "echo hello"]
++        );
++    }
++}
++
+ #[cfg(all(test, target_os = "macos"))]
+ fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Shell {
+     codex_shell_command::shell_detect::default_user_shell_from_path(user_shell_path).into()
+diff --git a/codex-rs/core/src/shell_snapshot.rs b/codex-rs/core/src/shell_snapshot.rs
+index d987417436..788a08da67 100644
+--- a/codex-rs/core/src/shell_snapshot.rs
++++ b/codex-rs/core/src/shell_snapshot.rs
+@@ -46,6 +46,13 @@ const SNAPSHOT_RETENTION: Duration = Duration::from_secs(60 * 60 * 24 * 3); // 3
+ const SNAPSHOT_DIR: &str = "shell_snapshots";
+ const EXCLUDED_EXPORT_VARS: &[&str] = &["PWD", "OLDPWD"];
+ 
++fn shell_snapshot_supported(shell_type: ShellType) -> bool {
++    !matches!(
++        shell_type,
++        ShellType::PowerShell | ShellType::Cmd | ShellType::Winuxsh
++    )
++}
++
+ impl ShellSnapshot {
+     pub(crate) fn new(
+         codex_home: AbsolutePathBuf,
+@@ -79,6 +86,10 @@ impl ShellSnapshot {
+         }
+ 
+         let shell = shell?;
++        if !shell_snapshot_supported(shell.shell_type) {
++            return None;
++        }
++
+         // TODO(anp): Migrate shell snapshot creation to accept PathUri and defer native
+         // conversion to the spawned shell process.
+         let cwd = cwd.to_abs_path().ok()?;
+@@ -203,7 +214,7 @@ async fn write_shell_snapshot(
+     output_path: &AbsolutePathBuf,
+     cwd: &AbsolutePathBuf,
+ ) -> Result<()> {
+-    if shell_type == ShellType::PowerShell || shell_type == ShellType::Cmd {
++    if !shell_snapshot_supported(shell_type) {
+         bail!("Shell snapshot not supported yet for {shell_type:?}");
+     }
+     let shell = get_shell(shell_type, /*path*/ None)
+@@ -233,6 +244,7 @@ async fn capture_snapshot(shell: &Shell, cwd: &AbsolutePathBuf) -> Result<String
+         ShellType::Zsh => run_shell_script(shell, &zsh_snapshot_script(), cwd).await,
+         ShellType::Bash => run_shell_script(shell, &bash_snapshot_script(), cwd).await,
+         ShellType::Sh => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
++        ShellType::Winuxsh => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
+         ShellType::PowerShell => run_shell_script(shell, powershell_snapshot_script(), cwd).await,
+         ShellType::Cmd => bail!("Shell snapshotting is not yet supported for {shell_type:?}"),
+     }
+diff --git a/codex-rs/core/src/shell_snapshot_tests.rs b/codex-rs/core/src/shell_snapshot_tests.rs
+index c32a723d74..766cb0cbca 100644
+--- a/codex-rs/core/src/shell_snapshot_tests.rs
++++ b/codex-rs/core/src/shell_snapshot_tests.rs
+@@ -101,6 +101,16 @@ fn strip_snapshot_preamble_requires_marker() {
+     assert!(result.is_err());
+ }
+ 
++#[test]
++fn shell_snapshot_support_excludes_non_replayable_shells() {
++    assert!(shell_snapshot_supported(ShellType::Bash));
++    assert!(shell_snapshot_supported(ShellType::Zsh));
++    assert!(shell_snapshot_supported(ShellType::Sh));
++    assert!(!shell_snapshot_supported(ShellType::PowerShell));
++    assert!(!shell_snapshot_supported(ShellType::Cmd));
++    assert!(!shell_snapshot_supported(ShellType::Winuxsh));
++}
++
+ #[test]
+ fn snapshot_file_name_parser_supports_legacy_and_suffixed_names() {
+     let session_id = "019cf82b-6a62-7700-bbbd-46909794ef89";
+diff --git a/codex-rs/core/src/shell_tests.rs b/codex-rs/core/src/shell_tests.rs
+index dea4a4f689..c7a80274b2 100644
+--- a/codex-rs/core/src/shell_tests.rs
++++ b/codex-rs/core/src/shell_tests.rs
+@@ -141,6 +141,19 @@ fn derive_exec_args() {
+         test_powershell_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
+         vec!["pwsh.exe", "-Command", "echo hello"]
+     );
++
++    let test_winuxsh_shell = Shell {
++        shell_type: ShellType::Winuxsh,
++        shell_path: PathBuf::from("winuxsh.exe"),
++    };
++    assert_eq!(
++        test_winuxsh_shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
++        vec!["winuxsh.exe", "-c", "echo hello"]
++    );
++    assert_eq!(
++        test_winuxsh_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
++        vec!["winuxsh.exe", "-C", "echo hello"]
++    );
+ }
+ 
+ #[tokio::test]
+diff --git a/codex-rs/core/src/tools/handlers/shell_spec.rs b/codex-rs/core/src/tools/handlers/shell_spec.rs
+index a07b741639..3253472381 100644
+--- a/codex-rs/core/src/tools/handlers/shell_spec.rs
++++ b/codex-rs/core/src/tools/handlers/shell_spec.rs
+@@ -190,7 +190,7 @@ pub fn create_shell_command_tool(options: CommandToolOptions) -> ToolSpec {
+ 
+     let description = if cfg!(windows) {
+         format!(
+-            r#"Runs a Powershell command (Windows) and returns its output.
++            r#"Runs a command in the user's default Windows shell and returns its output.
+ 
+ Examples of valid command strings:
+ 
+@@ -404,6 +404,7 @@ fn file_system_permissions_schema() -> JsonSchema {
+ 
+ fn windows_shell_guidance() -> &'static str {
+     r#"Windows safety rules:
++- If `<shell>winuxsh</shell>` appears in the environment context, commands run in Winuxsh by default. For PowerShell-specific syntax, invoke PowerShell explicitly with `pwsh -Command ...` or `powershell.exe -Command ...`.
+ - Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.
+ - Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.
+ - When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control."#
+diff --git a/codex-rs/core/src/tools/handlers/shell_spec_tests.rs b/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
+index 044a6112f7..f3866ebce8 100644
+--- a/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
+@@ -210,7 +210,7 @@ fn shell_command_tool_matches_expected_spec() {
+     });
+ 
+     let description = if cfg!(windows) {
+-        r#"Runs a Powershell command (Windows) and returns its output.
++        r#"Runs a command in the user's default Windows shell and returns its output.
+ 
+ Examples of valid command strings:
+ 
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+index 89d0cd136f..95b329e96e 100644
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -64,6 +64,7 @@ pub(crate) fn tool_user_shell_type(
+         crate::shell::ShellType::PowerShell => codex_tools::ToolUserShellType::PowerShell,
+         crate::shell::ShellType::Sh => codex_tools::ToolUserShellType::Sh,
+         crate::shell::ShellType::Cmd => codex_tools::ToolUserShellType::Cmd,
++        crate::shell::ShellType::Winuxsh => codex_tools::ToolUserShellType::Winuxsh,
+     }
+ }
+ 
+diff --git a/codex-rs/docs/winuxsh-first-class-shell-plan.md b/codex-rs/docs/winuxsh-first-class-shell-plan.md
+new file mode 100644
+index 0000000000..941f318f33
+--- /dev/null
++++ b/codex-rs/docs/winuxsh-first-class-shell-plan.md
+@@ -0,0 +1,46 @@
++# Winuxsh First-Class Shell Plan
++
++## Goal
++
++Make Winuxsh a first-class Codex shell on Windows instead of relying only on a configurable shell path workaround.
++
++## Current Upstream Shape
++
++- Shell identity is centralized in `codex-shell-command::shell_detect::ShellType`.
++- Command argv generation happens in `codex-core::shell::Shell::derive_exec_args`.
++- Approval, safety, dangerous-command detection, and apply_patch interception reuse bash-like shell parsing for `bash`, `zsh`, and `sh`.
++- Windows currently defaults to PowerShell when no explicit shell path is provided.
++
++## Implementation Phases
++
++1. Add `ShellType::Winuxsh`
++   - Recognize `winuxsh` and `winuxsh.exe`.
++   - Report the stable shell name as `winuxsh`.
++   - Resolve via PATH first, then common Windows install locations.
++
++2. Make Winuxsh the preferred Windows default
++   - On Windows, choose Winuxsh when it is installed.
++   - Fall back to PowerShell and then the ultimate `cmd.exe` fallback.
++
++3. Generate native Winuxsh exec argv
++   - Use `winuxsh -C <script>` for login/profile calls so user configuration is loaded.
++   - Use `winuxsh -c <script>` when login/profile loading is disabled.
++   - Do not emit `-lc`; current Winuxsh exposes `-C` instead of bash/zsh-style login-shell flags.
++
++4. Integrate Codex safety behavior
++   - Treat Winuxsh as bash-like for command parsing, safe-command checks, dangerous-command checks, approval canonicalization, and apply_patch heredoc interception.
++   - Ban broad persisted approval prefixes such as `winuxsh`, `winuxsh -C`, `winuxsh --repl-command`, and `winuxsh -c`.
++
++5. Preserve environment/snapshot behavior
++   - Use the portable sh snapshot script for Winuxsh when snapshotting is available.
++   - Keep PowerShell-only UTF-8 and profile handling scoped to PowerShell.
++
++6. Update protocol comments and tests
++   - Document `winuxsh` as a stable shell name.
++   - Add targeted tests for detection, argv generation, safety parsing, dangerous parsing, canonicalization, and apply_patch interception.
++
++## Follow-Up Work
++
++- Add a formal user-facing config knob only if upstream wants shell selection to be configurable independently from auto-detection.
++- Add Winuxsh CI coverage once a stable installer or test binary is available on Windows runners.
++- Consider adding `-lc` compatibility in Winuxsh itself later; Codex should not depend on it for first-class support.
+diff --git a/codex-rs/exec-server-protocol/src/protocol.rs b/codex-rs/exec-server-protocol/src/protocol.rs
+index e6bf999ca1..e1fba1a3d5 100644
+--- a/codex-rs/exec-server-protocol/src/protocol.rs
++++ b/codex-rs/exec-server-protocol/src/protocol.rs
+@@ -149,7 +149,7 @@ impl EnvironmentInfo {
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct ShellInfo {
+-    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, or `cmd`.
++    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, `cmd`, or `winuxsh`.
+     pub name: String,
+     /// Target-native shell executable path or command name. Fallbacks such as `cmd.exe` need not
+     /// be absolute, so this is not a [`PathUri`].
+diff --git a/codex-rs/shell-command/src/bash.rs b/codex-rs/shell-command/src/bash.rs
+index 10da75fb65..5467227f5d 100644
+--- a/codex-rs/shell-command/src/bash.rs
++++ b/codex-rs/shell-command/src/bash.rs
+@@ -104,12 +104,15 @@ pub fn extract_bash_command(command: &[String]) -> Option<(&str, &str)> {
+     let [shell, flag, script] = command else {
+         return None;
+     };
+-    if !matches!(flag.as_str(), "-lc" | "-c")
+-        || !matches!(
+-            detect_shell_type(PathBuf::from(shell)),
+-            Some(ShellType::Zsh) | Some(ShellType::Bash) | Some(ShellType::Sh)
+-        )
+-    {
++    let shell_type = detect_shell_type(PathBuf::from(shell));
++    let valid_shell_flag = match shell_type {
++        Some(ShellType::Zsh | ShellType::Bash | ShellType::Sh) => {
++            matches!(flag.as_str(), "-lc" | "-c")
++        }
++        Some(ShellType::Winuxsh) => matches!(flag.as_str(), "-C" | "--repl-command" | "-c"),
++        _ => false,
++    };
++    if !valid_shell_flag {
+         return None;
+     }
+     Some((shell, script))
+@@ -533,6 +536,23 @@ mod tests {
+         assert_eq!(parsed, vec![vec!["ls".to_string()]]);
+     }
+ 
++    #[test]
++    fn parse_winuxsh_repl_command_plain_commands() {
++        for flag in ["-C", "--repl-command"] {
++            let command = vec![
++                "winuxsh".to_string(),
++                flag.to_string(),
++                "git status".to_string(),
++            ];
++            let parsed = parse_shell_lc_plain_commands(&command).unwrap();
++            assert_eq!(
++                parsed,
++                vec![vec!["git".to_string(), "status".to_string()]],
++                "{flag}"
++            );
++        }
++    }
++
+     #[test]
+     fn accepts_concatenated_flag_and_value() {
+         // Test case: -g"*.py" (flag directly concatenated with quoted value)
+diff --git a/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs b/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
+index 0574fcf7d7..a8535a8712 100644
+--- a/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
++++ b/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
+@@ -309,6 +309,15 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn forced_rm_in_winuxsh_script_is_dangerous() {
++        let command = vec_str(&["winuxsh", "-C", "echo ok && rm -rf /tmp/example"]);
++        assert_eq!(
++            dangerous_command_match(&command),
++            Some(DangerousCommandMatch::ForcedRm)
++        );
++    }
++
+     #[test]
+     fn non_forced_or_non_literal_rm_is_not_dangerous() {
+         for command in [
+diff --git a/codex-rs/shell-command/src/command_safety/is_safe_command.rs b/codex-rs/shell-command/src/command_safety/is_safe_command.rs
+index bca44139cd..5f4950b47a 100644
+--- a/codex-rs/shell-command/src/command_safety/is_safe_command.rs
++++ b/codex-rs/shell-command/src/command_safety/is_safe_command.rs
+@@ -536,6 +536,20 @@ mod tests {
+         assert!(is_known_safe_command(&vec_str(&["zsh", "-lc", "ls"])));
+     }
+ 
++    #[test]
++    fn winuxsh_repl_command_safe_command_sequence() {
++        assert!(is_known_safe_command(&vec_str(&[
++            "winuxsh",
++            "-C",
++            "git status",
++        ])));
++        assert!(!is_known_safe_command(&vec_str(&[
++            "winuxsh",
++            "-C",
++            "ls && rm -rf /",
++        ])));
++    }
++
+     #[test]
+     fn unknown_or_partial() {
+         assert!(!is_safe_to_call_with_exec(&vec_str(&["foo"])));
+diff --git a/codex-rs/shell-command/src/parse_command.rs b/codex-rs/shell-command/src/parse_command.rs
+index 7f5e8942d7..bcfd81b876 100644
+--- a/codex-rs/shell-command/src/parse_command.rs
++++ b/codex-rs/shell-command/src/parse_command.rs
+@@ -322,6 +322,21 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn winuxsh_repl_command_supports_cat() {
++        let inner = "cat README.md";
++        for flag in ["-C", "--repl-command"] {
++            assert_parsed(
++                &vec_str(&["winuxsh", flag, inner]),
++                vec![ParsedCommand::Read {
++                    cmd: inner.to_string(),
++                    name: "README.md".to_string(),
++                    path: PathBuf::from("README.md"),
++                }],
++            );
++        }
++    }
++
+     #[test]
+     fn supports_bat() {
+         let inner = "bat --theme TwoDark README.md";
+diff --git a/codex-rs/shell-command/src/shell_detect.rs b/codex-rs/shell-command/src/shell_detect.rs
+index 69a66f0563..72c4834852 100644
+--- a/codex-rs/shell-command/src/shell_detect.rs
++++ b/codex-rs/shell-command/src/shell_detect.rs
+@@ -10,6 +10,7 @@ pub enum ShellType {
+     PowerShell,
+     Sh,
+     Cmd,
++    Winuxsh,
+ }
+ 
+ impl ShellType {
+@@ -20,6 +21,7 @@ impl ShellType {
+             Self::PowerShell => "powershell",
+             Self::Sh => "sh",
+             Self::Cmd => "cmd",
++            Self::Winuxsh => "winuxsh",
+         }
+     }
+ }
+@@ -45,6 +47,7 @@ pub fn detect_shell_type(shell_path: impl AsRef<std::path::Path>) -> Option<Shel
+         Some("bash") => Some(ShellType::Bash),
+         Some("pwsh") => Some(ShellType::PowerShell),
+         Some("powershell") => Some(ShellType::PowerShell),
++        Some("winuxsh") => Some(ShellType::Winuxsh),
+         _ => {
+             let shell_name = shell_path.file_stem();
+             if let Some(shell_name) = shell_name {
+@@ -238,6 +241,40 @@ fn get_cmd_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
+     })
+ }
+ 
++#[cfg(windows)]
++const WINUXSH_FALLBACK_PATHS: &[&str] = &[
++    r#"C:\Program Files\Winuxsh\winuxsh.exe"#,
++    r#"C:\Program Files (x86)\Winuxsh\winuxsh.exe"#,
++];
++
++#[cfg(windows)]
++fn get_local_app_data_winuxsh_shell_path() -> Option<PathBuf> {
++    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
++    file_exists(
++        std::path::Path::new(&local_app_data)
++            .join("Programs")
++            .join("Winuxsh")
++            .join("winuxsh.exe")
++            .as_path(),
++    )
++}
++
++#[cfg(windows)]
++fn get_winuxsh_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
++    let shell_path = get_shell_path(ShellType::Winuxsh, path, "winuxsh", WINUXSH_FALLBACK_PATHS)
++        .or_else(get_local_app_data_winuxsh_shell_path);
++
++    shell_path.map(|shell_path| DetectedShell {
++        shell_type: ShellType::Winuxsh,
++        shell_path,
++    })
++}
++
++#[cfg(not(windows))]
++fn get_winuxsh_shell(_path: Option<&PathBuf>) -> Option<DetectedShell> {
++    None
++}
++
+ pub fn ultimate_fallback_shell() -> DetectedShell {
+     if cfg!(windows) {
+         DetectedShell {
+@@ -265,6 +302,7 @@ pub fn get_shell(shell_type: ShellType, path: Option<&PathBuf>) -> Option<Detect
+         ShellType::PowerShell => get_powershell_shell(path),
+         ShellType::Sh => get_sh_shell(path),
+         ShellType::Cmd => get_cmd_shell(path),
++        ShellType::Winuxsh => get_winuxsh_shell(path),
+     }
+ }
+ 
+@@ -274,7 +312,14 @@ pub fn default_user_shell() -> DetectedShell {
+ 
+ pub fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> DetectedShell {
+     if cfg!(windows) {
+-        get_shell(ShellType::PowerShell, /*path*/ None).unwrap_or_else(ultimate_fallback_shell)
++        let user_default_shell = user_shell_path
++            .and_then(|shell| detect_shell_type(&shell))
++            .and_then(|shell_type| get_shell(shell_type, /*path*/ None));
++
++        user_default_shell
++            .or_else(|| get_shell(ShellType::Winuxsh, /*path*/ None))
++            .or_else(|| get_shell(ShellType::PowerShell, /*path*/ None))
++            .unwrap_or_else(ultimate_fallback_shell)
+     } else {
+         let user_default_shell = user_shell_path
+             .and_then(|shell| detect_shell_type(&shell))
+@@ -317,6 +362,14 @@ mod tests {
+             detect_shell_type(PathBuf::from("powershell")),
+             Some(ShellType::PowerShell)
+         );
++        assert_eq!(
++            detect_shell_type(PathBuf::from("winuxsh")),
++            Some(ShellType::Winuxsh)
++        );
++        assert_eq!(
++            detect_shell_type(PathBuf::from("winuxsh.exe")),
++            Some(ShellType::Winuxsh)
++        );
+         assert_eq!(detect_shell_type(PathBuf::from("fish")), None);
+         assert_eq!(detect_shell_type(PathBuf::from("other")), None);
+         assert_eq!(
+@@ -364,5 +417,22 @@ mod tests {
+             detect_shell_type(PathBuf::from("cmd.exe")),
+             Some(ShellType::Cmd)
+         );
++        assert_eq!(
++            detect_shell_type(PathBuf::from(if cfg!(windows) {
++                r"C:\Users\example\AppData\Local\Programs\Winuxsh\winuxsh.exe"
++            } else {
++                "/usr/local/bin/winuxsh"
++            })),
++            Some(ShellType::Winuxsh)
++        );
++    }
++
++    #[test]
++    fn windows_default_user_shell_prefers_winuxsh_when_available() {
++        if !cfg!(windows) || get_shell(ShellType::Winuxsh, /*path*/ None).is_none() {
++            return;
++        }
++
++        assert_eq!(default_user_shell().shell_type, ShellType::Winuxsh);
+     }
+ }
+diff --git a/codex-rs/tools/src/tool_config.rs b/codex-rs/tools/src/tool_config.rs
+index 990d4a3c58..bae7a427e1 100644
+--- a/codex-rs/tools/src/tool_config.rs
++++ b/codex-rs/tools/src/tool_config.rs
+@@ -33,6 +33,7 @@ pub enum ToolUserShellType {
+     PowerShell,
+     Sh,
+     Cmd,
++    Winuxsh,
+ }
+ 
+ pub fn request_user_input_available_modes(features: &Features) -> Vec<ModeKind> {

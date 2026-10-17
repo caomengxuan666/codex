@@ -1,0 +1,777 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: caomengxuan666 <2507560089@qq.com>
+Date: Wed, 14 Oct 2026 09:06:45 +0800
+Subject: [PATCH 4/7] Rename Winuxsh shell integration to Niu (niu.exe)
+
+Winuxsh was renamed to NiuBash: the binary is now niu.exe with the same
+-C/-c/--repl-command interface. Update shell detection, safety checks,
+apply_patch interception, tests, docs, and the Windows build workflow
+accordingly. Fallback install paths now point at Programs\\Niubash.
+---
+ ...-build.yml => niu-codex-windows-build.yml} |  4 +-
+ README.md                                     | 18 +++----
+ RELEASE.md                                    | 42 +++++++--------
+ .../src/protocol/v2/environment.rs            |  2 +-
+ codex-rs/apply-patch/src/invocation.rs        | 10 ++--
+ .../src/command_canonicalization_tests.rs     |  4 +-
+ codex-rs/core/src/exec_policy.rs              | 20 +++----
+ codex-rs/core/src/exec_policy_tests.rs        | 14 ++---
+ codex-rs/core/src/shell.rs                    | 14 ++---
+ codex-rs/core/src/shell_snapshot.rs           |  4 +-
+ codex-rs/core/src/shell_snapshot_tests.rs     |  2 +-
+ codex-rs/core/src/shell_tests.rs              | 14 ++---
+ .../core/src/tools/handlers/shell_spec.rs     |  2 +-
+ codex-rs/core/src/tools/mod.rs                |  2 +-
+ ...-plan.md => niu-first-class-shell-plan.md} | 34 ++++++------
+ codex-rs/exec-server-protocol/src/protocol.rs |  2 +-
+ codex-rs/shell-command/src/bash.rs            |  6 +--
+ .../command_safety/is_dangerous_command.rs    |  4 +-
+ .../src/command_safety/is_safe_command.rs     |  6 +--
+ codex-rs/shell-command/src/parse_command.rs   |  4 +-
+ codex-rs/shell-command/src/shell_detect.rs    | 52 +++++++++----------
+ codex-rs/tools/src/tool_config.rs             |  2 +-
+ .../unified_exec/backends/elevated_tests.rs   |  2 +-
+ .../windows-sandbox-rs/src/wrapper_tests.rs   |  2 +-
+ 24 files changed, 133 insertions(+), 133 deletions(-)
+ rename .github/workflows/{winuxsh-codex-windows-build.yml => niu-codex-windows-build.yml} (96%)
+ rename codex-rs/docs/{winuxsh-first-class-shell-plan.md => niu-first-class-shell-plan.md} (57%)
+
+diff --git a/.github/workflows/winuxsh-codex-windows-build.yml b/.github/workflows/niu-codex-windows-build.yml
+similarity index 96%
+rename from .github/workflows/winuxsh-codex-windows-build.yml
+rename to .github/workflows/niu-codex-windows-build.yml
+index 5026a0ee82..5fce2f07de 100644
+--- a/.github/workflows/winuxsh-codex-windows-build.yml
++++ b/.github/workflows/niu-codex-windows-build.yml
+@@ -1,4 +1,4 @@
+-name: winuxsh-codex-windows-build
++name: niu-codex-windows-build
+ 
+ on:
+   workflow_dispatch:
+@@ -6,7 +6,7 @@ on:
+       artifact_name:
+         description: "Artifact name"
+         required: false
+-        default: "winuxsh-codex-preview-windows-x86_64"
++        default: "niu-codex-preview-windows-x86_64"
+       release_tag:
+         description: "Optional GitHub release tag to upload the zip to"
+         required: false
+diff --git a/README.md b/README.md
+index c79fb6e144..283f3c0128 100644
+--- a/README.md
++++ b/README.md
+@@ -1,18 +1,18 @@
+-## Codex CLI + Winuxsh
++## Codex CLI + NiuBash
+ 
+-This branch makes Winuxsh a first-class Windows shell for Codex CLI.
++This branch makes NiuBash a first-class Windows shell for Codex CLI.
+ 
+-- Detects `winuxsh` and `winuxsh.exe` as a stable shell type.
+-- Prefers Winuxsh on Windows when it is installed, then falls back to
++- Detects `niu` and `niu.exe` as a stable shell type.
++- Prefers NiuBash on Windows when it is installed, then falls back to
+   PowerShell and `cmd.exe`.
+-- Runs Winuxsh commands with `winuxsh -C <script>` for profile-aware sessions
+-  and `winuxsh -c <script>` for plain non-login execution.
++- Runs NiuBash commands with `niu -C <script>` for profile-aware sessions
++  and `niu -c <script>` for plain non-login execution.
+ - Reuses the existing bash-like parsing, safety checks, approval
+   canonicalization, and `apply_patch` interception paths.
+ 
+-Install Winuxsh from the
+-[Winuxsh releases page](https://github.com/unixwin/winuxsh/releases), make sure
+-`winuxsh.exe` is on `PATH`, then run Codex normally on Windows. See
++Install NiuBash from the
++[NiuBash releases page](https://github.com/caomengxuan666/dsh-niu/releases), make sure
++`niu.exe` is on `PATH`, then run Codex normally on Windows. See
+ [`RELEASE.md`](RELEASE.md) for the manual release notes and asset checklist for
+ this fork.
+ 
+diff --git a/RELEASE.md b/RELEASE.md
+index 556a3da5db..5773b61ef8 100644
+--- a/RELEASE.md
++++ b/RELEASE.md
+@@ -1,59 +1,59 @@
+-# Winuxsh Codex Release
++# NiuBash Codex Release
+ 
+-This file is the manual release checklist for the `winuxsh-first-class-shell`
++This file is the manual release checklist for the `niu-first-class-shell`
+ branch. It intentionally does not add GitHub Actions or local build automation;
+-use existing release assets from the Winuxsh project when publishing this fork.
++use existing release assets from the NiuBash project when publishing this fork.
+ 
+ ## Scope
+ 
+-- Codex detects `winuxsh` and `winuxsh.exe` as `ShellType::Winuxsh`.
+-- Windows default shell selection prefers Winuxsh when available.
+-- Winuxsh command execution uses `winuxsh -C` for profile-aware shell sessions
+-  and `winuxsh -c` for plain shell sessions.
++- Codex detects `niu` and `niu.exe` as `ShellType::NiuBash`.
++- Windows default shell selection prefers NiuBash when available.
++- NiuBash command execution uses `niu -C` for profile-aware shell sessions
++  and `niu -c` for plain shell sessions.
+ - Bash-like command parsing, safe-command checks, dangerous-command checks,
+-  approval prefix handling, and `apply_patch` interception include Winuxsh.
+-- Shell snapshots stay disabled for Winuxsh until replay behavior is explicitly
++  approval prefix handling, and `apply_patch` interception include NiuBash.
++- Shell snapshots stay disabled for NiuBash until replay behavior is explicitly
+   supported.
+ 
+ ## Manual Asset Checklist
+ 
+ - Do not run Codex release workflows for this branch.
+-- Use the existing Winuxsh release archive from the sibling Winuxsh repo, for
+-  example `../winuxsh/dist/winuxsh-v0.10.3.zip`.
+-- Attach the Winuxsh installer or portable archive from the Winuxsh release page
++- Use the existing NiuBash release archive from the sibling NiuBash repo, for
++  example `../niu/dist/niu-v0.10.3.zip`.
++- Attach the NiuBash installer or portable archive from the NiuBash release page
+   if GitHub-hosted assets are preferred.
+ - Include this repository commit SHA in the release description.
+ - Smoke test on Windows with:
+ 
+ ```shell
+-winuxsh -c 'printf "winuxsh ok\n"'
++niu -c 'printf "niu ok\n"'
+ codex --version
+ ```
+ 
+ ## Suggested Release Body
+ 
+ ```markdown
+-## Codex CLI with first-class Winuxsh support
++## Codex CLI with first-class NiuBash support
+ 
+-This fork updates Codex on Windows to treat Winuxsh as a native shell target
++This fork updates Codex on Windows to treat NiuBash as a native shell target
+ instead of routing command execution through PowerShell by default.
+ 
+ ### Changes
+ 
+-- Detect `winuxsh` and `winuxsh.exe` as a stable shell type.
+-- Prefer Winuxsh on Windows when it is installed.
+-- Execute Winuxsh commands with `winuxsh -C` or `winuxsh -c` depending on shell
++- Detect `niu` and `niu.exe` as a stable shell type.
++- Prefer NiuBash on Windows when it is installed.
++- Execute NiuBash commands with `niu -C` or `niu -c` depending on shell
+   profile requirements.
+ - Apply bash-like parsing, command safety checks, approval handling, and
+-  `apply_patch` interception to Winuxsh commands.
++  `apply_patch` interception to NiuBash commands.
+ 
+ ### Assets
+ 
+-Use the existing Winuxsh release assets for the shell runtime. This release does
++Use the existing NiuBash release assets for the shell runtime. This release does
+ not introduce a Codex GitHub Actions release workflow.
+ 
+ ### Notes
+ 
+-Install Winuxsh first, ensure `winuxsh.exe` is available on `PATH`, then run
++Install NiuBash first, ensure `niu.exe` is available on `PATH`, then run
+ Codex normally on Windows.
+ ```
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/environment.rs b/codex-rs/app-server-protocol/src/protocol/v2/environment.rs
+index d89bcf3db9..fd87e96cbf 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/environment.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/environment.rs
+@@ -94,7 +94,7 @@ pub enum EnvironmentStatusKind {
+ #[serde(rename_all = "camelCase")]
+ #[ts(export_to = "v2/")]
+ pub struct EnvironmentShellInfo {
+-    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, `cmd`, or `winuxsh`.
++    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, `cmd`, or `niu`.
+     pub name: String,
+     /// Target-native shell executable path or command name.
+     pub path: String,
+diff --git a/codex-rs/apply-patch/src/invocation.rs b/codex-rs/apply-patch/src/invocation.rs
+index dec910f2e3..583b8ab87f 100644
+--- a/codex-rs/apply-patch/src/invocation.rs
++++ b/codex-rs/apply-patch/src/invocation.rs
+@@ -63,7 +63,7 @@ fn classify_shell_name(shell: &str, convention: PathConvention) -> Option<String
+ fn classify_shell(shell: &str, flag: &str, convention: PathConvention) -> Option<ApplyPatchShell> {
+     classify_shell_name(shell, convention).and_then(|name| match name.as_str() {
+         "bash" | "zsh" | "sh" if matches!(flag, "-lc" | "-c") => Some(ApplyPatchShell::Unix),
+-        "winuxsh" if matches!(flag, "-C" | "--repl-command" | "-c") => Some(ApplyPatchShell::Unix),
++        "niu" if matches!(flag, "-C" | "--repl-command" | "-c") => Some(ApplyPatchShell::Unix),
+         "pwsh" | "powershell" if flag.eq_ignore_ascii_case("-command") => {
+             Some(ApplyPatchShell::PowerShell)
+         }
+@@ -467,8 +467,8 @@ mod tests {
+         strs_to_strings(&["bash", "-lc", script])
+     }
+ 
+-    fn args_winuxsh(script: &str) -> Vec<String> {
+-        strs_to_strings(&["winuxsh.exe", "-C", script])
++    fn args_niu(script: &str) -> Vec<String> {
++        strs_to_strings(&["niu.exe", "-C", script])
+     }
+ 
+     fn args_powershell(script: &str) -> Vec<String> {
+@@ -650,9 +650,9 @@ mod tests {
+     }
+ 
+     #[tokio::test]
+-    async fn test_winuxsh_heredoc() {
++    async fn test_niu_heredoc() {
+         let script = heredoc_script("cd foo && ");
+-        assert_match_args(args_winuxsh(&script), Some("foo"));
++        assert_match_args(args_niu(&script), Some("foo"));
+     }
+ 
+     #[tokio::test]
+diff --git a/codex-rs/core/src/command_canonicalization_tests.rs b/codex-rs/core/src/command_canonicalization_tests.rs
+index 2f2ac79d30..cff4328684 100644
+--- a/codex-rs/core/src/command_canonicalization_tests.rs
++++ b/codex-rs/core/src/command_canonicalization_tests.rs
+@@ -54,9 +54,9 @@ fn canonicalizes_heredoc_scripts_to_stable_script_key() {
+ }
+ 
+ #[test]
+-fn canonicalizes_winuxsh_scripts_like_other_bash_like_shells() {
++fn canonicalizes_niu_scripts_like_other_bash_like_shells() {
+     let command = vec![
+-        "winuxsh.exe".to_string(),
++        "niu.exe".to_string(),
+         "-C".to_string(),
+         "cargo test -p codex-core".to_string(),
+     ];
+diff --git a/codex-rs/core/src/exec_policy.rs b/codex-rs/core/src/exec_policy.rs
+index 67b010de3d..ee12c782b1 100644
+--- a/codex-rs/core/src/exec_policy.rs
++++ b/codex-rs/core/src/exec_policy.rs
+@@ -142,16 +142,16 @@ pub(crate) static BANNED_PREFIX_SUGGESTIONS: &[&[&str]] = &[
+     &["zsh"],
+     &["zsh", "-c"],
+     &["zsh", "-lc"],
+-    &["winuxsh"],
+-    &["winuxsh", "-C"],
+-    &["winuxsh", "-c"],
+-    &["winuxsh", "-lc"],
+-    &["winuxsh", "--repl-command"],
+-    &["winuxsh.exe"],
+-    &["winuxsh.exe", "-C"],
+-    &["winuxsh.exe", "-c"],
+-    &["winuxsh.exe", "-lc"],
+-    &["winuxsh.exe", "--repl-command"],
++    &["niu"],
++    &["niu", "-C"],
++    &["niu", "-c"],
++    &["niu", "-lc"],
++    &["niu", "--repl-command"],
++    &["niu.exe"],
++    &["niu.exe", "-C"],
++    &["niu.exe", "-c"],
++    &["niu.exe", "-lc"],
++    &["niu.exe", "--repl-command"],
+ ];
+ 
+ /// Describes which unmatched-command heuristics should classify the command
+diff --git a/codex-rs/core/src/exec_policy_tests.rs b/codex-rs/core/src/exec_policy_tests.rs
+index 4aa4cd67d4..22bffb0e98 100644
+--- a/codex-rs/core/src/exec_policy_tests.rs
++++ b/codex-rs/core/src/exec_policy_tests.rs
+@@ -1945,13 +1945,13 @@ fn derive_requested_execpolicy_amendment_returns_none_for_shell_and_powershell_v
+         vec!["sh".to_string(), "-c".to_string()],
+         vec!["sh".to_string(), "-lc".to_string()],
+         vec!["zsh".to_string(), "-lc".to_string()],
+-        vec!["winuxsh".to_string()],
+-        vec!["winuxsh".to_string(), "-C".to_string()],
+-        vec!["winuxsh".to_string(), "-c".to_string()],
+-        vec!["winuxsh".to_string(), "--repl-command".to_string()],
+-        vec!["winuxsh.exe".to_string(), "-C".to_string()],
+-        vec!["winuxsh.exe".to_string(), "-c".to_string()],
+-        vec!["winuxsh.exe".to_string(), "--repl-command".to_string()],
++        vec!["niu".to_string()],
++        vec!["niu".to_string(), "-C".to_string()],
++        vec!["niu".to_string(), "-c".to_string()],
++        vec!["niu".to_string(), "--repl-command".to_string()],
++        vec!["niu.exe".to_string(), "-C".to_string()],
++        vec!["niu.exe".to_string(), "-c".to_string()],
++        vec!["niu.exe".to_string(), "--repl-command".to_string()],
+         vec!["/bin/bash".to_string(), "-lc".to_string()],
+         vec!["/bin/zsh".to_string(), "-lc".to_string()],
+         vec!["pwsh".to_string()],
+diff --git a/codex-rs/core/src/shell.rs b/codex-rs/core/src/shell.rs
+index 51bf0f8b09..4d5ebba547 100644
+--- a/codex-rs/core/src/shell.rs
++++ b/codex-rs/core/src/shell.rs
+@@ -29,7 +29,7 @@ impl Shell {
+                     command.to_string(),
+                 ]
+             }
+-            ShellType::Winuxsh => {
++            ShellType::Niu => {
+                 let arg = if use_login_shell { "-C" } else { "-c" };
+                 vec![
+                     self.shell_path.to_string_lossy().to_string(),
+@@ -74,7 +74,7 @@ impl Shell {
+             "powershell" => ShellType::PowerShell,
+             "sh" => ShellType::Sh,
+             "cmd" => ShellType::Cmd,
+-            "winuxsh" => ShellType::Winuxsh,
++            "niu" => ShellType::Niu,
+             name => anyhow::bail!("unknown environment shell `{name}`"),
+         };
+ 
+@@ -107,19 +107,19 @@ mod platform_independent_tests {
+     use super::*;
+ 
+     #[test]
+-    fn winuxsh_uses_profile_and_no_profile_exec_args() {
++    fn niu_uses_profile_and_no_profile_exec_args() {
+         let shell = Shell {
+-            shell_type: ShellType::Winuxsh,
+-            shell_path: PathBuf::from("winuxsh.exe"),
++            shell_type: ShellType::Niu,
++            shell_path: PathBuf::from("niu.exe"),
+         };
+ 
+         assert_eq!(
+             shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
+-            vec!["winuxsh.exe", "-c", "echo hello"]
++            vec!["niu.exe", "-c", "echo hello"]
+         );
+         assert_eq!(
+             shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
+-            vec!["winuxsh.exe", "-C", "echo hello"]
++            vec!["niu.exe", "-C", "echo hello"]
+         );
+     }
+ }
+diff --git a/codex-rs/core/src/shell_snapshot.rs b/codex-rs/core/src/shell_snapshot.rs
+index 788a08da67..d8d5503bf8 100644
+--- a/codex-rs/core/src/shell_snapshot.rs
++++ b/codex-rs/core/src/shell_snapshot.rs
+@@ -49,7 +49,7 @@ const EXCLUDED_EXPORT_VARS: &[&str] = &["PWD", "OLDPWD"];
+ fn shell_snapshot_supported(shell_type: ShellType) -> bool {
+     !matches!(
+         shell_type,
+-        ShellType::PowerShell | ShellType::Cmd | ShellType::Winuxsh
++        ShellType::PowerShell | ShellType::Cmd | ShellType::Niu
+     )
+ }
+ 
+@@ -244,7 +244,7 @@ async fn capture_snapshot(shell: &Shell, cwd: &AbsolutePathBuf) -> Result<String
+         ShellType::Zsh => run_shell_script(shell, &zsh_snapshot_script(), cwd).await,
+         ShellType::Bash => run_shell_script(shell, &bash_snapshot_script(), cwd).await,
+         ShellType::Sh => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
+-        ShellType::Winuxsh => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
++        ShellType::Niu => run_shell_script(shell, &sh_snapshot_script(), cwd).await,
+         ShellType::PowerShell => run_shell_script(shell, powershell_snapshot_script(), cwd).await,
+         ShellType::Cmd => bail!("Shell snapshotting is not yet supported for {shell_type:?}"),
+     }
+diff --git a/codex-rs/core/src/shell_snapshot_tests.rs b/codex-rs/core/src/shell_snapshot_tests.rs
+index 766cb0cbca..9f1a3dd012 100644
+--- a/codex-rs/core/src/shell_snapshot_tests.rs
++++ b/codex-rs/core/src/shell_snapshot_tests.rs
+@@ -108,7 +108,7 @@ fn shell_snapshot_support_excludes_non_replayable_shells() {
+     assert!(shell_snapshot_supported(ShellType::Sh));
+     assert!(!shell_snapshot_supported(ShellType::PowerShell));
+     assert!(!shell_snapshot_supported(ShellType::Cmd));
+-    assert!(!shell_snapshot_supported(ShellType::Winuxsh));
++    assert!(!shell_snapshot_supported(ShellType::Niu));
+ }
+ 
+ #[test]
+diff --git a/codex-rs/core/src/shell_tests.rs b/codex-rs/core/src/shell_tests.rs
+index c7a80274b2..5eab410abf 100644
+--- a/codex-rs/core/src/shell_tests.rs
++++ b/codex-rs/core/src/shell_tests.rs
+@@ -142,17 +142,17 @@ fn derive_exec_args() {
+         vec!["pwsh.exe", "-Command", "echo hello"]
+     );
+ 
+-    let test_winuxsh_shell = Shell {
+-        shell_type: ShellType::Winuxsh,
+-        shell_path: PathBuf::from("winuxsh.exe"),
++    let test_niu_shell = Shell {
++        shell_type: ShellType::Niu,
++        shell_path: PathBuf::from("niu.exe"),
+     };
+     assert_eq!(
+-        test_winuxsh_shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
+-        vec!["winuxsh.exe", "-c", "echo hello"]
++        test_niu_shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
++        vec!["niu.exe", "-c", "echo hello"]
+     );
+     assert_eq!(
+-        test_winuxsh_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
+-        vec!["winuxsh.exe", "-C", "echo hello"]
++        test_niu_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
++        vec!["niu.exe", "-C", "echo hello"]
+     );
+ }
+ 
+diff --git a/codex-rs/core/src/tools/handlers/shell_spec.rs b/codex-rs/core/src/tools/handlers/shell_spec.rs
+index 3253472381..01f601b9f6 100644
+--- a/codex-rs/core/src/tools/handlers/shell_spec.rs
++++ b/codex-rs/core/src/tools/handlers/shell_spec.rs
+@@ -404,7 +404,7 @@ fn file_system_permissions_schema() -> JsonSchema {
+ 
+ fn windows_shell_guidance() -> &'static str {
+     r#"Windows safety rules:
+-- If `<shell>winuxsh</shell>` appears in the environment context, commands run in Winuxsh by default. For PowerShell-specific syntax, invoke PowerShell explicitly with `pwsh -Command ...` or `powershell.exe -Command ...`.
++- If `<shell>niu</shell>` appears in the environment context, commands run in Niu by default. For PowerShell-specific syntax, invoke PowerShell explicitly with `pwsh -Command ...` or `powershell.exe -Command ...`.
+ - Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.
+ - Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.
+ - When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control."#
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+index 53c96d2e7a..1a796f5702 100644
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -66,7 +66,7 @@ pub(crate) fn tool_user_shell_type(
+         crate::shell::ShellType::PowerShell => codex_tools::ToolUserShellType::PowerShell,
+         crate::shell::ShellType::Sh => codex_tools::ToolUserShellType::Sh,
+         crate::shell::ShellType::Cmd => codex_tools::ToolUserShellType::Cmd,
+-        crate::shell::ShellType::Winuxsh => codex_tools::ToolUserShellType::Winuxsh,
++        crate::shell::ShellType::Niu => codex_tools::ToolUserShellType::Niu,
+     }
+ }
+ 
+diff --git a/codex-rs/docs/winuxsh-first-class-shell-plan.md b/codex-rs/docs/niu-first-class-shell-plan.md
+similarity index 57%
+rename from codex-rs/docs/winuxsh-first-class-shell-plan.md
+rename to codex-rs/docs/niu-first-class-shell-plan.md
+index 941f318f33..9e2e644df2 100644
+--- a/codex-rs/docs/winuxsh-first-class-shell-plan.md
++++ b/codex-rs/docs/niu-first-class-shell-plan.md
+@@ -1,8 +1,8 @@
+-# Winuxsh First-Class Shell Plan
++# NiuBash First-Class Shell Plan
+ 
+ ## Goal
+ 
+-Make Winuxsh a first-class Codex shell on Windows instead of relying only on a configurable shell path workaround.
++Make NiuBash a first-class Codex shell on Windows instead of relying only on a configurable shell path workaround.
+ 
+ ## Current Upstream Shape
+ 
+@@ -13,34 +13,34 @@ Make Winuxsh a first-class Codex shell on Windows instead of relying only on a c
+ 
+ ## Implementation Phases
+ 
+-1. Add `ShellType::Winuxsh`
+-   - Recognize `winuxsh` and `winuxsh.exe`.
+-   - Report the stable shell name as `winuxsh`.
++1. Add `ShellType::NiuBash`
++   - Recognize `niu` and `niu.exe`.
++   - Report the stable shell name as `niu`.
+    - Resolve via PATH first, then common Windows install locations.
+ 
+-2. Make Winuxsh the preferred Windows default
+-   - On Windows, choose Winuxsh when it is installed.
++2. Make NiuBash the preferred Windows default
++   - On Windows, choose NiuBash when it is installed.
+    - Fall back to PowerShell and then the ultimate `cmd.exe` fallback.
+ 
+-3. Generate native Winuxsh exec argv
+-   - Use `winuxsh -C <script>` for login/profile calls so user configuration is loaded.
+-   - Use `winuxsh -c <script>` when login/profile loading is disabled.
+-   - Do not emit `-lc`; current Winuxsh exposes `-C` instead of bash/zsh-style login-shell flags.
++3. Generate native NiuBash exec argv
++   - Use `niu -C <script>` for login/profile calls so user configuration is loaded.
++   - Use `niu -c <script>` when login/profile loading is disabled.
++   - Do not emit `-lc`; current NiuBash exposes `-C` instead of bash/zsh-style login-shell flags.
+ 
+ 4. Integrate Codex safety behavior
+-   - Treat Winuxsh as bash-like for command parsing, safe-command checks, dangerous-command checks, approval canonicalization, and apply_patch heredoc interception.
+-   - Ban broad persisted approval prefixes such as `winuxsh`, `winuxsh -C`, `winuxsh --repl-command`, and `winuxsh -c`.
++   - Treat NiuBash as bash-like for command parsing, safe-command checks, dangerous-command checks, approval canonicalization, and apply_patch heredoc interception.
++   - Ban broad persisted approval prefixes such as `niu`, `niu -C`, `niu --repl-command`, and `niu -c`.
+ 
+ 5. Preserve environment/snapshot behavior
+-   - Use the portable sh snapshot script for Winuxsh when snapshotting is available.
++   - Use the portable sh snapshot script for NiuBash when snapshotting is available.
+    - Keep PowerShell-only UTF-8 and profile handling scoped to PowerShell.
+ 
+ 6. Update protocol comments and tests
+-   - Document `winuxsh` as a stable shell name.
++   - Document `niu` as a stable shell name.
+    - Add targeted tests for detection, argv generation, safety parsing, dangerous parsing, canonicalization, and apply_patch interception.
+ 
+ ## Follow-Up Work
+ 
+ - Add a formal user-facing config knob only if upstream wants shell selection to be configurable independently from auto-detection.
+-- Add Winuxsh CI coverage once a stable installer or test binary is available on Windows runners.
+-- Consider adding `-lc` compatibility in Winuxsh itself later; Codex should not depend on it for first-class support.
++- Add NiuBash CI coverage once a stable installer or test binary is available on Windows runners.
++- Consider adding `-lc` compatibility in NiuBash itself later; Codex should not depend on it for first-class support.
+diff --git a/codex-rs/exec-server-protocol/src/protocol.rs b/codex-rs/exec-server-protocol/src/protocol.rs
+index 7c8e911198..8652bb3122 100644
+--- a/codex-rs/exec-server-protocol/src/protocol.rs
++++ b/codex-rs/exec-server-protocol/src/protocol.rs
+@@ -182,7 +182,7 @@ impl EnvironmentInfo {
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct ShellInfo {
+-    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, `cmd`, or `winuxsh`.
++    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, `cmd`, or `niu`.
+     pub name: String,
+     /// Target-native shell executable path or command name. Fallbacks such as `cmd.exe` need not
+     /// be absolute, so this is not a [`PathUri`].
+diff --git a/codex-rs/shell-command/src/bash.rs b/codex-rs/shell-command/src/bash.rs
+index 5467227f5d..f3b4397e17 100644
+--- a/codex-rs/shell-command/src/bash.rs
++++ b/codex-rs/shell-command/src/bash.rs
+@@ -109,7 +109,7 @@ pub fn extract_bash_command(command: &[String]) -> Option<(&str, &str)> {
+         Some(ShellType::Zsh | ShellType::Bash | ShellType::Sh) => {
+             matches!(flag.as_str(), "-lc" | "-c")
+         }
+-        Some(ShellType::Winuxsh) => matches!(flag.as_str(), "-C" | "--repl-command" | "-c"),
++        Some(ShellType::Niu) => matches!(flag.as_str(), "-C" | "--repl-command" | "-c"),
+         _ => false,
+     };
+     if !valid_shell_flag {
+@@ -537,10 +537,10 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn parse_winuxsh_repl_command_plain_commands() {
++    fn parse_niu_repl_command_plain_commands() {
+         for flag in ["-C", "--repl-command"] {
+             let command = vec![
+-                "winuxsh".to_string(),
++                "niu".to_string(),
+                 flag.to_string(),
+                 "git status".to_string(),
+             ];
+diff --git a/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs b/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
+index a8535a8712..57ea5740cb 100644
+--- a/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
++++ b/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
+@@ -310,8 +310,8 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn forced_rm_in_winuxsh_script_is_dangerous() {
+-        let command = vec_str(&["winuxsh", "-C", "echo ok && rm -rf /tmp/example"]);
++    fn forced_rm_in_niu_script_is_dangerous() {
++        let command = vec_str(&["niu", "-C", "echo ok && rm -rf /tmp/example"]);
+         assert_eq!(
+             dangerous_command_match(&command),
+             Some(DangerousCommandMatch::ForcedRm)
+diff --git a/codex-rs/shell-command/src/command_safety/is_safe_command.rs b/codex-rs/shell-command/src/command_safety/is_safe_command.rs
+index 5f4950b47a..9e6669d04b 100644
+--- a/codex-rs/shell-command/src/command_safety/is_safe_command.rs
++++ b/codex-rs/shell-command/src/command_safety/is_safe_command.rs
+@@ -537,14 +537,14 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn winuxsh_repl_command_safe_command_sequence() {
++    fn niu_repl_command_safe_command_sequence() {
+         assert!(is_known_safe_command(&vec_str(&[
+-            "winuxsh",
++            "niu",
+             "-C",
+             "git status",
+         ])));
+         assert!(!is_known_safe_command(&vec_str(&[
+-            "winuxsh",
++            "niu",
+             "-C",
+             "ls && rm -rf /",
+         ])));
+diff --git a/codex-rs/shell-command/src/parse_command.rs b/codex-rs/shell-command/src/parse_command.rs
+index bcfd81b876..fa21165bfa 100644
+--- a/codex-rs/shell-command/src/parse_command.rs
++++ b/codex-rs/shell-command/src/parse_command.rs
+@@ -323,11 +323,11 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn winuxsh_repl_command_supports_cat() {
++    fn niu_repl_command_supports_cat() {
+         let inner = "cat README.md";
+         for flag in ["-C", "--repl-command"] {
+             assert_parsed(
+-                &vec_str(&["winuxsh", flag, inner]),
++                &vec_str(&["niu", flag, inner]),
+                 vec![ParsedCommand::Read {
+                     cmd: inner.to_string(),
+                     name: "README.md".to_string(),
+diff --git a/codex-rs/shell-command/src/shell_detect.rs b/codex-rs/shell-command/src/shell_detect.rs
+index 72c4834852..00c15cd7ce 100644
+--- a/codex-rs/shell-command/src/shell_detect.rs
++++ b/codex-rs/shell-command/src/shell_detect.rs
+@@ -10,7 +10,7 @@ pub enum ShellType {
+     PowerShell,
+     Sh,
+     Cmd,
+-    Winuxsh,
++    Niu,
+ }
+ 
+ impl ShellType {
+@@ -21,7 +21,7 @@ impl ShellType {
+             Self::PowerShell => "powershell",
+             Self::Sh => "sh",
+             Self::Cmd => "cmd",
+-            Self::Winuxsh => "winuxsh",
++            Self::Niu => "niu",
+         }
+     }
+ }
+@@ -47,7 +47,7 @@ pub fn detect_shell_type(shell_path: impl AsRef<std::path::Path>) -> Option<Shel
+         Some("bash") => Some(ShellType::Bash),
+         Some("pwsh") => Some(ShellType::PowerShell),
+         Some("powershell") => Some(ShellType::PowerShell),
+-        Some("winuxsh") => Some(ShellType::Winuxsh),
++        Some("niu") => Some(ShellType::Niu),
+         _ => {
+             let shell_name = shell_path.file_stem();
+             if let Some(shell_name) = shell_name {
+@@ -242,36 +242,36 @@ fn get_cmd_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
+ }
+ 
+ #[cfg(windows)]
+-const WINUXSH_FALLBACK_PATHS: &[&str] = &[
+-    r#"C:\Program Files\Winuxsh\winuxsh.exe"#,
+-    r#"C:\Program Files (x86)\Winuxsh\winuxsh.exe"#,
++const NIU_FALLBACK_PATHS: &[&str] = &[
++    r#"C:\Program Files\Niubash\niu.exe"#,
++    r#"C:\Program Files (x86)\Niubash\niu.exe"#,
+ ];
+ 
+ #[cfg(windows)]
+-fn get_local_app_data_winuxsh_shell_path() -> Option<PathBuf> {
++fn get_local_app_data_niu_shell_path() -> Option<PathBuf> {
+     let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+     file_exists(
+         std::path::Path::new(&local_app_data)
+             .join("Programs")
+-            .join("Winuxsh")
+-            .join("winuxsh.exe")
++            .join("Niubash")
++            .join("niu.exe")
+             .as_path(),
+     )
+ }
+ 
+ #[cfg(windows)]
+-fn get_winuxsh_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
+-    let shell_path = get_shell_path(ShellType::Winuxsh, path, "winuxsh", WINUXSH_FALLBACK_PATHS)
+-        .or_else(get_local_app_data_winuxsh_shell_path);
++fn get_niu_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
++    let shell_path = get_shell_path(ShellType::Niu, path, "niu", NIU_FALLBACK_PATHS)
++        .or_else(get_local_app_data_niu_shell_path);
+ 
+     shell_path.map(|shell_path| DetectedShell {
+-        shell_type: ShellType::Winuxsh,
++        shell_type: ShellType::Niu,
+         shell_path,
+     })
+ }
+ 
+ #[cfg(not(windows))]
+-fn get_winuxsh_shell(_path: Option<&PathBuf>) -> Option<DetectedShell> {
++fn get_niu_shell(_path: Option<&PathBuf>) -> Option<DetectedShell> {
+     None
+ }
+ 
+@@ -302,7 +302,7 @@ pub fn get_shell(shell_type: ShellType, path: Option<&PathBuf>) -> Option<Detect
+         ShellType::PowerShell => get_powershell_shell(path),
+         ShellType::Sh => get_sh_shell(path),
+         ShellType::Cmd => get_cmd_shell(path),
+-        ShellType::Winuxsh => get_winuxsh_shell(path),
++        ShellType::Niu => get_niu_shell(path),
+     }
+ }
+ 
+@@ -317,7 +317,7 @@ pub fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Detecte
+             .and_then(|shell_type| get_shell(shell_type, /*path*/ None));
+ 
+         user_default_shell
+-            .or_else(|| get_shell(ShellType::Winuxsh, /*path*/ None))
++            .or_else(|| get_shell(ShellType::Niu, /*path*/ None))
+             .or_else(|| get_shell(ShellType::PowerShell, /*path*/ None))
+             .unwrap_or_else(ultimate_fallback_shell)
+     } else {
+@@ -363,12 +363,12 @@ mod tests {
+             Some(ShellType::PowerShell)
+         );
+         assert_eq!(
+-            detect_shell_type(PathBuf::from("winuxsh")),
+-            Some(ShellType::Winuxsh)
++            detect_shell_type(PathBuf::from("niu")),
++            Some(ShellType::Niu)
+         );
+         assert_eq!(
+-            detect_shell_type(PathBuf::from("winuxsh.exe")),
+-            Some(ShellType::Winuxsh)
++            detect_shell_type(PathBuf::from("niu.exe")),
++            Some(ShellType::Niu)
+         );
+         assert_eq!(detect_shell_type(PathBuf::from("fish")), None);
+         assert_eq!(detect_shell_type(PathBuf::from("other")), None);
+@@ -419,20 +419,20 @@ mod tests {
+         );
+         assert_eq!(
+             detect_shell_type(PathBuf::from(if cfg!(windows) {
+-                r"C:\Users\example\AppData\Local\Programs\Winuxsh\winuxsh.exe"
++                r"C:\Users\example\AppData\Local\Programs\Niu\niu.exe"
+             } else {
+-                "/usr/local/bin/winuxsh"
++                "/usr/local/bin/niu"
+             })),
+-            Some(ShellType::Winuxsh)
++            Some(ShellType::Niu)
+         );
+     }
+ 
+     #[test]
+-    fn windows_default_user_shell_prefers_winuxsh_when_available() {
+-        if !cfg!(windows) || get_shell(ShellType::Winuxsh, /*path*/ None).is_none() {
++    fn windows_default_user_shell_prefers_niu_when_available() {
++        if !cfg!(windows) || get_shell(ShellType::Niu, /*path*/ None).is_none() {
+             return;
+         }
+ 
+-        assert_eq!(default_user_shell().shell_type, ShellType::Winuxsh);
++        assert_eq!(default_user_shell().shell_type, ShellType::Niu);
+     }
+ }
+diff --git a/codex-rs/tools/src/tool_config.rs b/codex-rs/tools/src/tool_config.rs
+index bae7a427e1..634ca64b46 100644
+--- a/codex-rs/tools/src/tool_config.rs
++++ b/codex-rs/tools/src/tool_config.rs
+@@ -33,7 +33,7 @@ pub enum ToolUserShellType {
+     PowerShell,
+     Sh,
+     Cmd,
+-    Winuxsh,
++    Niu,
+ }
+ 
+ pub fn request_user_input_available_modes(features: &Features) -> Vec<ModeKind> {
+diff --git a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs
+index 5504750bfd..14caf1bb2a 100644
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs
+@@ -85,7 +85,7 @@ fn retry_uses_original_unified_exec_request_and_stops_after_second_failure() {
+         },
+         read_roots_override: Some(vec![PathBuf::from(r"C:\workspace\read")]),
+         read_roots_include_platform_defaults: true,
+-        additional_read_roots: vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\winuxsh")],
++        additional_read_roots: vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\niu")],
+         write_roots_override: Some(vec![PathBuf::from(r"C:\workspace\write")]),
+         deny_read_paths_override: vec![PathBuf::from(r"C:\secrets")],
+         deny_write_paths_override: vec![PathBuf::from(r"C:\workspace\.codex")],
+diff --git a/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs b/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs
+index fa6eddc8c7..daa90fba8c 100644
+--- a/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs
+@@ -42,7 +42,7 @@ fn windows_wrapper_args_round_trip() {
+         network: NetworkSandboxPolicy::Restricted,
+     };
+     let read_roots_override = vec![PathBuf::from(r"C:\read")];
+-    let additional_read_roots = vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\winuxsh")];
++    let additional_read_roots = vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\niu")];
+     let write_roots_override = vec![PathBuf::from(r"C:\write")];
+     let deny_read_paths_override = vec![
+         AbsolutePathBuf::from_absolute_path(Path::new(r"C:\blocked-read"))

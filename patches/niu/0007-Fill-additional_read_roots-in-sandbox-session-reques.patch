@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: caomengxuan666 <2507560089@qq.com>
+Date: Wed, 14 Oct 2026 10:43:16 +0800
+Subject: [PATCH 7/7] Fill additional_read_roots in sandbox session request
+ test
+
+Upstream added the field to WindowsSandboxSessionRequest; update the
+restricted-token managed-network test initializer accordingly.
+---
+ codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs b/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs
+index 399cb5adc0..769d22cfcb 100644
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs
+@@ -244,6 +244,7 @@ fn restricted_token_rejects_managed_network_before_spawn() {
+             timeout_ms: None,
+             read_roots_override: None,
+             read_roots_include_platform_defaults: false,
++            additional_read_roots: &[],
+             write_roots_override: None,
+             deny_read_paths_override: &[],
+             deny_write_paths_override: &[],

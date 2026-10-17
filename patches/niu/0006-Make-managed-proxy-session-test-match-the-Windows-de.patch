@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: caomengxuan666 <2507560089@qq.com>
+Date: Wed, 14 Oct 2026 10:32:47 +0800
+Subject: [PATCH 6/7] Make managed-proxy session test match the Windows default
+ shell family
+
+With NiuBash installed the Windows default shell is bash-like, so the
+PowerShell-syntax probe exits 2 under niu -c. Pick the probe syntax from
+the detected default shell instead.
+---
+ codex-rs/core/src/session/tests.rs | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 3a9cec895b..4d8db860f6 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -1373,7 +1373,17 @@ async fn user_shell_commands_do_not_inherit_managed_network_proxy() -> anyhow::R
+     assert!(turn_context.network.is_some());
+ 
+     #[cfg(windows)]
+-    let command = r#"$val = $env:HTTP_PROXY; if ([string]::IsNullOrEmpty($val)) { $val = 'not-set' } ; [System.Console]::Write($val)"#.to_string();
++    // The Windows default shell depends on what is installed (PowerShell or a
++    // bash-like shell such as NiuBash), so match the command to its family.
++    let command = {
++        use codex_shell_command::shell_detect::ShellType;
++        match codex_shell_command::shell_detect::default_user_shell().shell_type {
++            ShellType::PowerShell | ShellType::Cmd => {
++                r#"$val = $env:HTTP_PROXY; if ([string]::IsNullOrEmpty($val)) { $val = 'not-set' } ; [System.Console]::Write($val)"#.to_string()
++            }
++            _ => r#"printf '%s' "${HTTP_PROXY:-not-set}""#.to_string(),
++        }
++    };
+     #[cfg(not(windows))]
+     let command = r#"sh -c "printf '%s' \"${HTTP_PROXY:-not-set}\"""#.to_string();
+ 

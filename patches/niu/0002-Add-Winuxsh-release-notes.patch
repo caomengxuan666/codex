@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: caomengxuan666 <2507560089@qq.com>
+Date: Fri, 7 Aug 2026 21:37:27 +0800
+Subject: [PATCH 2/7] Add Winuxsh release notes
+
+---
+ README.md  | 20 ++++++++++++++++++
+ RELEASE.md | 59 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 79 insertions(+)
+ create mode 100644 RELEASE.md
+
+diff --git a/README.md b/README.md
+index 06b02fced7..c79fb6e144 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,23 @@
++## Codex CLI + Winuxsh
++
++This branch makes Winuxsh a first-class Windows shell for Codex CLI.
++
++- Detects `winuxsh` and `winuxsh.exe` as a stable shell type.
++- Prefers Winuxsh on Windows when it is installed, then falls back to
++  PowerShell and `cmd.exe`.
++- Runs Winuxsh commands with `winuxsh -C <script>` for profile-aware sessions
++  and `winuxsh -c <script>` for plain non-login execution.
++- Reuses the existing bash-like parsing, safety checks, approval
++  canonicalization, and `apply_patch` interception paths.
++
++Install Winuxsh from the
++[Winuxsh releases page](https://github.com/unixwin/winuxsh/releases), make sure
++`winuxsh.exe` is on `PATH`, then run Codex normally on Windows. See
++[`RELEASE.md`](RELEASE.md) for the manual release notes and asset checklist for
++this fork.
++
++---
++
+ <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
+ <p align="center">
+   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
+diff --git a/RELEASE.md b/RELEASE.md
+new file mode 100644
+index 0000000000..556a3da5db
+--- /dev/null
++++ b/RELEASE.md
+@@ -0,0 +1,59 @@
++# Winuxsh Codex Release
++
++This file is the manual release checklist for the `winuxsh-first-class-shell`
++branch. It intentionally does not add GitHub Actions or local build automation;
++use existing release assets from the Winuxsh project when publishing this fork.
++
++## Scope
++
++- Codex detects `winuxsh` and `winuxsh.exe` as `ShellType::Winuxsh`.
++- Windows default shell selection prefers Winuxsh when available.
++- Winuxsh command execution uses `winuxsh -C` for profile-aware shell sessions
++  and `winuxsh -c` for plain shell sessions.
++- Bash-like command parsing, safe-command checks, dangerous-command checks,
++  approval prefix handling, and `apply_patch` interception include Winuxsh.
++- Shell snapshots stay disabled for Winuxsh until replay behavior is explicitly
++  supported.
++
++## Manual Asset Checklist
++
++- Do not run Codex release workflows for this branch.
++- Use the existing Winuxsh release archive from the sibling Winuxsh repo, for
++  example `../winuxsh/dist/winuxsh-v0.10.3.zip`.
++- Attach the Winuxsh installer or portable archive from the Winuxsh release page
++  if GitHub-hosted assets are preferred.
++- Include this repository commit SHA in the release description.
++- Smoke test on Windows with:
++
++```shell
++winuxsh -c 'printf "winuxsh ok\n"'
++codex --version
++```
++
++## Suggested Release Body
++
++```markdown
++## Codex CLI with first-class Winuxsh support
++
++This fork updates Codex on Windows to treat Winuxsh as a native shell target
++instead of routing command execution through PowerShell by default.
++
++### Changes
++
++- Detect `winuxsh` and `winuxsh.exe` as a stable shell type.
++- Prefer Winuxsh on Windows when it is installed.
++- Execute Winuxsh commands with `winuxsh -C` or `winuxsh -c` depending on shell
++  profile requirements.
++- Apply bash-like parsing, command safety checks, approval handling, and
++  `apply_patch` interception to Winuxsh commands.
++
++### Assets
++
++Use the existing Winuxsh release assets for the shell runtime. This release does
++not introduce a Codex GitHub Actions release workflow.
++
++### Notes
++
++Install Winuxsh first, ensure `winuxsh.exe` is available on `PATH`, then run
++Codex normally on Windows.
++```

@@ -1,0 +1,7 @@
+# Upstream commit this fork is based on.
+# Refreshed by scripts/niu/sync-upstream.sh pin after every rebase.
+repo=https://github.com/openai/codex
+branch=main
+commit=2230d64464488d8847197722fdca09d90095c705
+commit_date=2026-08-12T03:00:47Z
+fork_commits=8

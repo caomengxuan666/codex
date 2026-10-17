@@ -1,0 +1,569 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: caomengxuan666 <2507560089@qq.com>
+Date: Sat, 8 Aug 2026 01:25:26 +0800
+Subject: [PATCH 3/7] Fix Windows sandbox access to external shell
+
+---
+ .../workflows/winuxsh-codex-windows-build.yml | 89 +++++++++++++++++++
+ codex-rs/cli/src/debug_sandbox.rs             |  1 +
+ codex-rs/core/src/exec.rs                     |  1 +
+ codex-rs/sandboxing/src/manager.rs            | 12 +++
+ codex-rs/sandboxing/src/manager_tests.rs      | 13 +++
+ codex-rs/sandboxing/src/spawn.rs              |  1 +
+ .../windows-sandbox-rs/src/elevated_impl.rs   |  4 +
+ codex-rs/windows-sandbox-rs/src/identity.rs   |  6 +-
+ codex-rs/windows-sandbox-rs/src/spawn_prep.rs |  2 +
+ .../src/unified_exec/backends/elevated.rs     |  6 ++
+ .../unified_exec/backends/elevated_tests.rs   |  5 ++
+ .../src/unified_exec/mod.rs                   |  4 +
+ .../src/unified_exec/tests.rs                 |  1 +
+ codex-rs/windows-sandbox-rs/src/wrapper.rs    | 16 ++++
+ .../windows-sandbox-rs/src/wrapper_tests.rs   |  5 ++
+ 15 files changed, 165 insertions(+), 1 deletion(-)
+ create mode 100644 .github/workflows/winuxsh-codex-windows-build.yml
+
+diff --git a/.github/workflows/winuxsh-codex-windows-build.yml b/.github/workflows/winuxsh-codex-windows-build.yml
+new file mode 100644
+index 0000000000..5026a0ee82
+--- /dev/null
++++ b/.github/workflows/winuxsh-codex-windows-build.yml
+@@ -0,0 +1,89 @@
++name: winuxsh-codex-windows-build
++
++on:
++  workflow_dispatch:
++    inputs:
++      artifact_name:
++        description: "Artifact name"
++        required: false
++        default: "winuxsh-codex-preview-windows-x86_64"
++      release_tag:
++        description: "Optional GitHub release tag to upload the zip to"
++        required: false
++        default: ""
++
++permissions:
++  contents: write
++
++jobs:
++  build:
++    name: Build Windows x64 preview
++    runs-on: windows-latest
++    timeout-minutes: 120
++    defaults:
++      run:
++        working-directory: codex-rs
++
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: dtolnay/rust-toolchain@1.95.0
++        with:
++          targets: x86_64-pc-windows-msvc
++
++      - name: Cache Cargo
++        uses: actions/cache@v4
++        with:
++          path: |
++            ~/.cargo/registry
++            ~/.cargo/git
++            codex-rs/target
++          key: cargo-windows-x64-${{ hashFiles('codex-rs/Cargo.lock') }}
++          restore-keys: cargo-windows-x64-
++
++      - name: Build sandbox helpers
++        shell: pwsh
++        run: cargo build --target x86_64-pc-windows-msvc --release --package codex-windows-sandbox --bins
++
++      - name: Build Codex CLI
++        shell: pwsh
++        run: cargo build --target x86_64-pc-windows-msvc --release --package codex-cli --bin codex
++
++      - name: Stage zip
++        shell: pwsh
++        run: |
++          $ErrorActionPreference = "Stop"
++          $artifactName = "${{ inputs.artifact_name }}"
++          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "codex-rs\target\x86_64-pc-windows-msvc\release"
++          $stageRoot = Join-Path $env:RUNNER_TEMP $artifactName
++          $stageDir = Join-Path $stageRoot $artifactName
++          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
++
++          Copy-Item (Join-Path $releaseDir "codex.exe") $stageDir
++          Copy-Item (Join-Path $releaseDir "codex-command-runner.exe") $stageDir
++          Copy-Item (Join-Path $releaseDir "codex-windows-sandbox-setup.exe") $stageDir
++          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "README.md") $stageDir
++          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "RELEASE.md") $stageDir
++
++          $zipPath = Join-Path $env:GITHUB_WORKSPACE "$artifactName.zip"
++          if (Test-Path $zipPath) {
++            Remove-Item $zipPath -Force
++          }
++          Compress-Archive -Path $stageDir -DestinationPath $zipPath -CompressionLevel Optimal
++          "ZIP_PATH=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Append
++
++      - name: Upload artifact
++        uses: actions/upload-artifact@v4
++        with:
++          name: ${{ inputs.artifact_name }}
++          path: ${{ env.ZIP_PATH }}
++          if-no-files-found: error
++
++      - name: Upload release asset
++        if: ${{ inputs.release_tag != '' }}
++        uses: softprops/action-gh-release@v2
++        with:
++          tag_name: ${{ inputs.release_tag }}
++          name: ${{ inputs.release_tag }}
++          prerelease: true
++          files: ${{ env.ZIP_PATH }}
+diff --git a/codex-rs/cli/src/debug_sandbox.rs b/codex-rs/cli/src/debug_sandbox.rs
+index 5f02f0eb82..9a9b8867f2 100644
+--- a/codex-rs/cli/src/debug_sandbox.rs
++++ b/codex-rs/cli/src/debug_sandbox.rs
+@@ -495,6 +495,7 @@ async fn run_command_under_windows_session(
+         timeout_ms: None,
+         read_roots_override: None,
+         read_roots_include_platform_defaults: false,
++        additional_read_roots: &[],
+         write_roots_override: None,
+         deny_read_paths_override: empty_paths,
+         deny_write_paths_override: empty_paths,
+diff --git a/codex-rs/core/src/exec.rs b/codex-rs/core/src/exec.rs
+index dbf10e3c39..9f5ce84c38 100644
+--- a/codex-rs/core/src/exec.rs
++++ b/codex-rs/core/src/exec.rs
+@@ -696,6 +696,7 @@ async fn exec_windows_sandbox(
+                     read_roots_override: elevated_read_roots_override.as_deref(),
+                     read_roots_include_platform_defaults:
+                         elevated_read_roots_include_platform_defaults,
++                    additional_read_roots: &[],
+                     write_roots_override: elevated_write_roots_override.as_deref(),
+                     deny_read_paths_override: &additional_deny_read_paths,
+                     deny_write_paths_override: &additional_deny_write_paths,
+diff --git a/codex-rs/sandboxing/src/manager.rs b/codex-rs/sandboxing/src/manager.rs
+index cf4cb90c8d..732c98ecaf 100644
+--- a/codex-rs/sandboxing/src/manager.rs
++++ b/codex-rs/sandboxing/src/manager.rs
+@@ -507,6 +507,17 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
+     };
+     let source = std::path::PathBuf::from(&program);
+     let helper = codex_windows_sandbox::resolve_exe_for_launch(source.as_path(), codex_home);
++    let mut additional_read_roots = Vec::new();
++    for path in [source.as_path(), helper.as_path()] {
++        if path.is_absolute()
++            && let Some(parent) = path.parent()
++        {
++            let parent = parent.to_path_buf();
++            if !additional_read_roots.iter().any(|root| root == &parent) {
++                additional_read_roots.push(parent);
++            }
++        }
++    }
+     *program = helper.to_string_lossy().into_owned();
+ 
+     let inner_command = std::mem::take(&mut request.command);
+@@ -572,6 +583,7 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
+             proxy_settings_mode,
+             read_roots_override,
+             read_roots_include_platform_defaults,
++            additional_read_roots.as_slice(),
+             write_roots_override,
+             deny_read_paths_override,
+             deny_write_paths_override,
+diff --git a/codex-rs/sandboxing/src/manager_tests.rs b/codex-rs/sandboxing/src/manager_tests.rs
+index 1fe2d51451..35cc35bb73 100644
+--- a/codex-rs/sandboxing/src/manager_tests.rs
++++ b/codex-rs/sandboxing/src/manager_tests.rs
+@@ -573,6 +573,19 @@ fn transform_for_direct_spawn_windows_materializes_inner_helper() {
+             .iter()
+             .any(|arg| arg == "--deny-read-paths-json")
+     );
++    let additional_read_roots_json = exec_request
++        .command
++        .windows(2)
++        .find_map(|args| (args[0] == "--additional-read-roots-json").then_some(&args[1]))
++        .expect("additional read roots");
++    let additional_read_roots =
++        serde_json::from_str::<Vec<std::path::PathBuf>>(additional_read_roots_json)
++            .expect("parse additional read roots");
++    assert!(
++        additional_read_roots
++            .iter()
++            .any(|root| root == helper_dir.path())
++    );
+     assert_eq!(
+         exec_request.command[separator_index + 2],
+         "--codex-run-as-fs-helper"
+diff --git a/codex-rs/sandboxing/src/spawn.rs b/codex-rs/sandboxing/src/spawn.rs
+index 5766c2b167..eec8323aad 100644
+--- a/codex-rs/sandboxing/src/spawn.rs
++++ b/codex-rs/sandboxing/src/spawn.rs
+@@ -70,6 +70,7 @@ pub async fn spawn_process(request: SpawnRequest<'_>) -> Result<SpawnedProcess>
+                         .and_then(|value| value.read_roots_override.as_deref()),
+                     read_roots_include_platform_defaults: overrides
+                         .is_some_and(|value| value.read_roots_include_platform_defaults),
++                    additional_read_roots: &[],
+                     write_roots_override: overrides
+                         .and_then(|value| value.write_roots_override.as_deref()),
+                     deny_read_paths_override: overrides.map_or(empty_paths, |value| {
+diff --git a/codex-rs/windows-sandbox-rs/src/elevated_impl.rs b/codex-rs/windows-sandbox-rs/src/elevated_impl.rs
+index 1de7889c1f..47346efdb8 100644
+--- a/codex-rs/windows-sandbox-rs/src/elevated_impl.rs
++++ b/codex-rs/windows-sandbox-rs/src/elevated_impl.rs
+@@ -18,6 +18,7 @@ pub struct ElevatedSandboxProfileCaptureRequest<'a> {
+     pub network_proxy_restricting_sid: Option<String>,
+     pub read_roots_override: Option<&'a [PathBuf]>,
+     pub read_roots_include_platform_defaults: bool,
++    pub additional_read_roots: &'a [PathBuf],
+     pub write_roots_override: Option<&'a [PathBuf]>,
+     pub deny_read_paths_override: &'a [AbsolutePathBuf],
+     pub deny_write_paths_override: &'a [AbsolutePathBuf],
+@@ -114,6 +115,7 @@ mod windows_impl {
+             network_proxy_restricting_sid,
+             read_roots_override,
+             read_roots_include_platform_defaults,
++            additional_read_roots,
+             write_roots_override,
+             deny_read_paths_override,
+             deny_write_paths_override,
+@@ -148,6 +150,7 @@ mod windows_impl {
+             codex_home,
+             read_roots_override,
+             read_roots_include_platform_defaults,
++            additional_read_roots,
+             write_roots_override,
+             &deny_read_paths_override,
+             &deny_write_paths_override,
+@@ -218,6 +221,7 @@ mod windows_impl {
+                         codex_home,
+                         read_roots_override,
+                         read_roots_include_platform_defaults,
++                        additional_read_roots,
+                         write_roots_override,
+                         &deny_read_paths_override,
+                         &deny_write_paths_override,
+diff --git a/codex-rs/windows-sandbox-rs/src/identity.rs b/codex-rs/windows-sandbox-rs/src/identity.rs
+index 860877dff2..733670a6de 100644
+--- a/codex-rs/windows-sandbox-rs/src/identity.rs
++++ b/codex-rs/windows-sandbox-rs/src/identity.rs
+@@ -150,6 +150,7 @@ pub fn require_logon_sandbox_creds(
+     codex_home: &Path,
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[PathBuf],
+     deny_write_paths_override: &[PathBuf],
+@@ -157,9 +158,10 @@ pub fn require_logon_sandbox_creds(
+     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
+ ) -> Result<SandboxCreds> {
+     let sandbox_dir = crate::setup::sandbox_dir(codex_home);
+-    let needed_read = read_roots_override
++    let mut needed_read = read_roots_override
+         .map(<[PathBuf]>::to_vec)
+         .unwrap_or_else(|| gather_read_roots(command_cwd, permissions, env_map, codex_home));
++    needed_read.extend(additional_read_roots.iter().cloned());
+     let needed_write = write_roots_override
+         .map(<[PathBuf]>::to_vec)
+         .unwrap_or_else(|| gather_write_roots_for_permissions(permissions, command_cwd, env_map));
+@@ -280,6 +282,7 @@ pub(crate) fn refresh_logon_sandbox_creds(
+     codex_home: &Path,
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[PathBuf],
+     deny_write_paths_override: &[PathBuf],
+@@ -294,6 +297,7 @@ pub(crate) fn refresh_logon_sandbox_creds(
+         codex_home,
+         read_roots_override,
+         read_roots_include_platform_defaults,
++        additional_read_roots,
+         write_roots_override,
+         deny_read_paths_override,
+         deny_write_paths_override,
+diff --git a/codex-rs/windows-sandbox-rs/src/spawn_prep.rs b/codex-rs/windows-sandbox-rs/src/spawn_prep.rs
+index 9479c0b8d7..e9f9b6b1a6 100644
+--- a/codex-rs/windows-sandbox-rs/src/spawn_prep.rs
++++ b/codex-rs/windows-sandbox-rs/src/spawn_prep.rs
+@@ -354,6 +354,7 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
+     command: &[String],
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[PathBuf],
+     deny_write_paths_override: &[PathBuf],
+@@ -406,6 +407,7 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
+         codex_home,
+         read_roots_override,
+         read_roots_include_platform_defaults,
++        additional_read_roots,
+         setup_write_roots_override,
+         deny_read_paths_override,
+         if deny_write_paths_override.is_empty() {
+diff --git a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated.rs b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated.rs
+index 138b0be790..3445198b33 100644
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated.rs
+@@ -36,6 +36,7 @@ struct RunnerTransportRequest {
+     spawn_request: SpawnRequest,
+     read_roots_override: Option<Vec<PathBuf>>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: Vec<PathBuf>,
+     write_roots_override: Option<Vec<PathBuf>>,
+     deny_read_paths_override: Vec<PathBuf>,
+     deny_write_paths_override: Vec<PathBuf>,
+@@ -54,6 +55,7 @@ fn spawn_runner_transport_with_retry<T>(
+         &Path,
+         Option<&[PathBuf]>,
+         bool,
++        &[PathBuf],
+         Option<&[PathBuf]>,
+         &[PathBuf],
+         &[PathBuf],
+@@ -81,6 +83,7 @@ fn spawn_runner_transport_with_retry<T>(
+                 &request.codex_home,
+                 request.read_roots_override.as_deref(),
+                 request.read_roots_include_platform_defaults,
++                request.additional_read_roots.as_slice(),
+                 request.write_roots_override.as_deref(),
+                 &request.deny_read_paths_override,
+                 &request.deny_write_paths_override,
+@@ -121,6 +124,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
+     timeout_ms: Option<u64>,
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[AbsolutePathBuf],
+     deny_write_paths_override: &[AbsolutePathBuf],
+@@ -149,6 +153,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
+         &command,
+         read_roots_override,
+         read_roots_include_platform_defaults,
++        additional_read_roots,
+         write_roots_override,
+         &deny_read_paths_override,
+         &deny_write_paths_override,
+@@ -180,6 +185,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
+         },
+         read_roots_override: read_roots_override.map(<[PathBuf]>::to_vec),
+         read_roots_include_platform_defaults,
++        additional_read_roots: additional_read_roots.to_vec(),
+         write_roots_override: write_roots_override.map(<[PathBuf]>::to_vec),
+         deny_read_paths_override,
+         deny_write_paths_override,
+diff --git a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs
+index a5187eb15c..5504750bfd 100644
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs
+@@ -36,6 +36,7 @@ struct RefreshObservation {
+     codex_home: PathBuf,
+     read_roots_override: Option<Vec<PathBuf>>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: Vec<PathBuf>,
+     write_roots_override: Option<Vec<PathBuf>>,
+     deny_read_paths_override: Vec<PathBuf>,
+     deny_write_paths_override: Vec<PathBuf>,
+@@ -84,6 +85,7 @@ fn retry_uses_original_unified_exec_request_and_stops_after_second_failure() {
+         },
+         read_roots_override: Some(vec![PathBuf::from(r"C:\workspace\read")]),
+         read_roots_include_platform_defaults: true,
++        additional_read_roots: vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\winuxsh")],
+         write_roots_override: Some(vec![PathBuf::from(r"C:\workspace\write")]),
+         deny_read_paths_override: vec![PathBuf::from(r"C:\secrets")],
+         deny_write_paths_override: vec![PathBuf::from(r"C:\workspace\.codex")],
+@@ -99,6 +101,7 @@ fn retry_uses_original_unified_exec_request_and_stops_after_second_failure() {
+         codex_home: request.codex_home.clone(),
+         read_roots_override: request.read_roots_override.clone(),
+         read_roots_include_platform_defaults: true,
++        additional_read_roots: request.additional_read_roots.clone(),
+         write_roots_override: request.write_roots_override.clone(),
+         deny_read_paths_override: request.deny_read_paths_override.clone(),
+         deny_write_paths_override: request.deny_write_paths_override.clone(),
+@@ -138,6 +141,7 @@ fn retry_uses_original_unified_exec_request_and_stops_after_second_failure() {
+          codex_home,
+          read_roots_override,
+          read_roots_include_platform_defaults,
++         additional_read_roots,
+          write_roots_override,
+          deny_read_paths_override,
+          deny_write_paths_override,
+@@ -150,6 +154,7 @@ fn retry_uses_original_unified_exec_request_and_stops_after_second_failure() {
+                 codex_home: codex_home.to_path_buf(),
+                 read_roots_override: read_roots_override.map(<[PathBuf]>::to_vec),
+                 read_roots_include_platform_defaults,
++                additional_read_roots: additional_read_roots.to_vec(),
+                 write_roots_override: write_roots_override.map(<[PathBuf]>::to_vec),
+                 deny_read_paths_override: deny_read_paths_override.to_vec(),
+                 deny_write_paths_override: deny_write_paths_override.to_vec(),
+diff --git a/codex-rs/windows-sandbox-rs/src/unified_exec/mod.rs b/codex-rs/windows-sandbox-rs/src/unified_exec/mod.rs
+index 92e3493edf..4ea7a32f28 100644
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/mod.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/mod.rs
+@@ -37,6 +37,7 @@ pub struct WindowsSandboxSessionRequest<'a> {
+     pub timeout_ms: Option<u64>,
+     pub read_roots_override: Option<&'a [PathBuf]>,
+     pub read_roots_include_platform_defaults: bool,
++    pub additional_read_roots: &'a [PathBuf],
+     pub write_roots_override: Option<&'a [PathBuf]>,
+     pub deny_read_paths_override: &'a [AbsolutePathBuf],
+     pub deny_write_paths_override: &'a [AbsolutePathBuf],
+@@ -64,6 +65,7 @@ pub async fn spawn_windows_sandbox_session_for_level(
+             request.timeout_ms,
+             request.read_roots_override,
+             request.read_roots_include_platform_defaults,
++            request.additional_read_roots,
+             request.write_roots_override,
+             request.deny_read_paths_override,
+             request.deny_write_paths_override,
+@@ -139,6 +141,7 @@ pub async fn spawn_windows_sandbox_session_elevated_for_permission_profile(
+     timeout_ms: Option<u64>,
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[AbsolutePathBuf],
+     deny_write_paths_override: &[AbsolutePathBuf],
+@@ -159,6 +162,7 @@ pub async fn spawn_windows_sandbox_session_elevated_for_permission_profile(
+         timeout_ms,
+         read_roots_override,
+         read_roots_include_platform_defaults,
++        additional_read_roots,
+         write_roots_override,
+         deny_read_paths_override,
+         deny_write_paths_override,
+diff --git a/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs b/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs
+index 819b1f073e..4f44a65698 100644
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs
+@@ -289,6 +289,7 @@ fn elevated_non_tty_cmd_forwards_env_output_and_exit() {
+             Some(5_000),
+             /*read_roots_override*/ None,
+             /*read_roots_include_platform_defaults*/ true,
++            /*additional_read_roots*/ &[],
+             /*write_roots_override*/ None,
+             &[],
+             &[],
+diff --git a/codex-rs/windows-sandbox-rs/src/wrapper.rs b/codex-rs/windows-sandbox-rs/src/wrapper.rs
+index 9729db1b84..f3dba42dbe 100644
+--- a/codex-rs/windows-sandbox-rs/src/wrapper.rs
++++ b/codex-rs/windows-sandbox-rs/src/wrapper.rs
+@@ -21,6 +21,7 @@ pub const CODEX_WINDOWS_SANDBOX_ARG1: &str = "--run-as-windows-sandbox";
+ 
+ const COMMAND_CWD_FLAG: &str = "--command-cwd";
+ const CODEX_HOME_FLAG: &str = "--codex-home";
++const ADDITIONAL_READ_ROOTS_JSON_FLAG: &str = "--additional-read-roots-json";
+ const DENY_READ_PATHS_JSON_FLAG: &str = "--deny-read-paths-json";
+ const DENY_WRITE_PATHS_JSON_FLAG: &str = "--deny-write-paths-json";
+ const ENV_JSON_FLAG: &str = "--env-json";
+@@ -49,6 +50,7 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
+     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[AbsolutePathBuf],
+     deny_write_paths_override: &[AbsolutePathBuf],
+@@ -99,6 +101,13 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
+     if read_roots_include_platform_defaults {
+         args.push(READ_ROOTS_INCLUDE_PLATFORM_DEFAULTS_FLAG.to_string());
+     }
++    if !additional_read_roots.is_empty() {
++        push_json_arg(
++            &mut args,
++            ADDITIONAL_READ_ROOTS_JSON_FLAG,
++            &additional_read_roots,
++        );
++    }
+     if let Some(write_roots_override) = write_roots_override {
+         push_json_arg(&mut args, WRITE_ROOTS_JSON_FLAG, &write_roots_override);
+     }
+@@ -169,6 +178,7 @@ struct WindowsSandboxWrapperRequest {
+     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
+     read_roots_override: Option<Vec<PathBuf>>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: Vec<PathBuf>,
+     write_roots_override: Option<Vec<PathBuf>>,
+     deny_read_paths_override: Vec<AbsolutePathBuf>,
+     deny_write_paths_override: Vec<AbsolutePathBuf>,
+@@ -194,6 +204,7 @@ async fn run_windows_sandbox_wrapper_request(request: WindowsSandboxWrapperReque
+             timeout_ms: None,
+             read_roots_override: request.read_roots_override.as_deref(),
+             read_roots_include_platform_defaults: request.read_roots_include_platform_defaults,
++            additional_read_roots: request.additional_read_roots.as_slice(),
+             write_roots_override: request.write_roots_override.as_deref(),
+             deny_read_paths_override: request.deny_read_paths_override.as_slice(),
+             deny_write_paths_override: request.deny_write_paths_override.as_slice(),
+@@ -220,6 +231,7 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
+     let mut proxy_settings_mode = crate::WindowsSandboxProxySettingsMode::Reconcile;
+     let mut read_roots_override = None;
+     let mut read_roots_include_platform_defaults = false;
++    let mut additional_read_roots = Vec::new();
+     let mut write_roots_override = None;
+     let mut deny_read_paths_override = Vec::new();
+     let mut deny_write_paths_override = Vec::new();
+@@ -271,6 +283,9 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
+                 read_roots_override =
+                     Some(json_flag_value(next_flag_value(&mut args, &arg)?, &arg)?);
+             }
++            ADDITIONAL_READ_ROOTS_JSON_FLAG => {
++                additional_read_roots = json_flag_value(next_flag_value(&mut args, &arg)?, &arg)?;
++            }
+             WRITE_ROOTS_JSON_FLAG => {
+                 write_roots_override =
+                     Some(json_flag_value(next_flag_value(&mut args, &arg)?, &arg)?);
+@@ -309,6 +324,7 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
+         proxy_settings_mode,
+         read_roots_override,
+         read_roots_include_platform_defaults,
++        additional_read_roots,
+         write_roots_override,
+         deny_read_paths_override,
+         deny_write_paths_override,
+diff --git a/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs b/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs
+index 207361d4c6..fa6eddc8c7 100644
+--- a/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs
+@@ -8,6 +8,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
+ use codex_utils_absolute_path::AbsolutePathBuf;
+ use pretty_assertions::assert_eq;
+ 
++use super::ADDITIONAL_READ_ROOTS_JSON_FLAG;
+ use super::CODEX_HOME_FLAG;
+ use super::CODEX_WINDOWS_SANDBOX_ARG1;
+ use super::COMMAND_CWD_FLAG;
+@@ -41,6 +42,7 @@ fn windows_wrapper_args_round_trip() {
+         network: NetworkSandboxPolicy::Restricted,
+     };
+     let read_roots_override = vec![PathBuf::from(r"C:\read")];
++    let additional_read_roots = vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\winuxsh")];
+     let write_roots_override = vec![PathBuf::from(r"C:\write")];
+     let deny_read_paths_override = vec![
+         AbsolutePathBuf::from_absolute_path(Path::new(r"C:\blocked-read"))
+@@ -67,6 +69,7 @@ fn windows_wrapper_args_round_trip() {
+         crate::WindowsSandboxProxySettingsMode::Preserve,
+         Some(read_roots_override.as_slice()),
+         /*read_roots_include_platform_defaults*/ true,
++        additional_read_roots.as_slice(),
+         Some(write_roots_override.as_slice()),
+         deny_read_paths_override.as_slice(),
+         deny_write_paths_override.as_slice(),
+@@ -86,6 +89,7 @@ fn windows_wrapper_args_round_trip() {
+     assert!(args.contains(&PRESERVE_PROXY_SETTINGS_FLAG.to_string()));
+     assert!(args.contains(&READ_ROOTS_JSON_FLAG.to_string()));
+     assert!(args.contains(&READ_ROOTS_INCLUDE_PLATFORM_DEFAULTS_FLAG.to_string()));
++    assert!(args.contains(&ADDITIONAL_READ_ROOTS_JSON_FLAG.to_string()));
+     assert!(args.contains(&WRITE_ROOTS_JSON_FLAG.to_string()));
+     assert!(args.contains(&DENY_READ_PATHS_JSON_FLAG.to_string()));
+     assert!(args.contains(&DENY_WRITE_PATHS_JSON_FLAG.to_string()));
+@@ -114,6 +118,7 @@ fn windows_wrapper_args_round_trip() {
+     );
+     assert_eq!(parsed.read_roots_override, Some(read_roots_override));
+     assert_eq!(parsed.read_roots_include_platform_defaults, true);
++    assert_eq!(parsed.additional_read_roots, additional_read_roots);
+     assert_eq!(parsed.write_roots_override, Some(write_roots_override));
+     assert_eq!(parsed.deny_read_paths_override, deny_read_paths_override);
+     assert_eq!(parsed.deny_write_paths_override, deny_write_paths_override);

@@ -1,0 +1,80 @@
+name: niu-patch-guard
+
+# Keeps the fork's delta provably applied to a current upstream openai/codex.
+#
+# Why this is a hard gate rather than a warning: part of the delta lives in
+# codex-rs/shell-command/src/command_safety/ (is_safe_command.rs,
+# is_dangerous_command.rs) and parse_command.rs. Upstream keeps adding
+# dangerous-command rules, so a fork that silently stops applying to upstream
+# main is not just inconvenient - it can allow on the niu path what upstream
+# already blocks, or block what upstream now allows.
+#
+# The job does not build the release binary (that takes hours); it proves the
+# patch series still applies and that the touched crate still compiles.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "codex-rs/shell-command/**"
+      - "codex-rs/windows-sandbox-rs/**"
+      - "codex-rs/core/src/tools/**"
+      - "codex-rs/sandboxing/**"
+      - "scripts/niu/**"
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Upstream patch guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the guard needs the merge base with upstream.
+          fetch-depth: 0
+
+      - name: Add upstream and fetch main
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/openai/codex.git
+          # Fetch the branch only. `--tags` pulls hundreds of tags and times out.
+          git fetch --no-tags upstream main
+
+      - name: Report drift
+        run: scripts/niu/sync-upstream.sh drift || true
+
+      - name: Export the fork delta as patches
+        run: scripts/niu/sync-upstream.sh export
+
+      - name: Apply the patches to a pristine upstream checkout
+        run: scripts/niu/sync-upstream.sh check
+
+      - name: Record the upstream pin
+        run: scripts/niu/sync-upstream.sh pin
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            codex-rs/target
+          key: niu-guard-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: niu-guard-
+
+      - name: Compile the crates the delta touches
+        working-directory: codex-rs
+        run: cargo check -p codex-shell-command -p codex-sandboxing
+
+      - name: Upload the exported patch series
+        uses: actions/upload-artifact@v4
+        with:
+          name: niu-patches
+          path: patches/niu/
+          if-no-files-found: error
