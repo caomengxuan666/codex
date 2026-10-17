@@ -347,6 +347,21 @@ mod tests {
     }
 
     #[test]
+    fn niu_repl_command_supports_cat() {
+        let inner = "cat README.md";
+        for flag in ["-C", "--repl-command"] {
+            assert_parsed(
+                &vec_str(&["niu", flag, inner]),
+                vec![ParsedCommand::Read {
+                    cmd: inner.to_string(),
+                    name: "README.md".to_string(),
+                    path: PathBuf::from("README.md"),
+                }],
+            );
+        }
+    }
+
+    #[test]
     fn supports_bat() {
         let inner = "bat --theme TwoDark README.md";
         assert_parsed(

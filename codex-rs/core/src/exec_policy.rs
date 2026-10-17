@@ -143,6 +143,16 @@ pub(crate) static BANNED_PREFIX_SUGGESTIONS: &[&[&str]] = &[
     &["zsh"],
     &["zsh", "-c"],
     &["zsh", "-lc"],
+    &["niu"],
+    &["niu", "-C"],
+    &["niu", "-c"],
+    &["niu", "-lc"],
+    &["niu", "--repl-command"],
+    &["niu.exe"],
+    &["niu.exe", "-C"],
+    &["niu.exe", "-c"],
+    &["niu.exe", "-lc"],
+    &["niu.exe", "--repl-command"],
 ];
 
 /// Describes which unmatched-command heuristics should classify the command

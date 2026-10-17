@@ -107,6 +107,13 @@ const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
 const SNAPSHOT_RETENTION: Duration = Duration::from_secs(60 * 60 * 24 * 3); // 3 days retention.
 const SNAPSHOT_DIR: &str = "shell_snapshots";
 
+fn shell_snapshot_supported(shell_type: ShellType) -> bool {
+    !matches!(
+        shell_type,
+        ShellType::PowerShell | ShellType::Cmd | ShellType::Niu
+    )
+}
+
 impl ShellSnapshot {
     pub(crate) fn new(
         codex_home: AbsolutePathBuf,
@@ -164,6 +171,10 @@ impl ShellSnapshot {
         }
 
         let shell = shell?;
+        if !shell_snapshot_supported(shell.shell_type) {
+            return None;
+        }
+
         // TODO(anp): Migrate shell snapshot creation to accept PathUri and defer native
         // conversion to the spawned shell process.
         let cwd = cwd.to_abs_path().ok()?;
@@ -546,7 +557,7 @@ async fn write_shell_snapshot(
     sandbox: Option<&ShellSnapshotSandbox>,
 ) -> Result<Option<SnapshotCredentials>> {
     let shell_type = shell.shell_type;
-    if shell_type == ShellType::PowerShell || shell_type == ShellType::Cmd {
+    if !shell_snapshot_supported(shell_type) {
         bail!("Shell snapshot not supported yet for {shell_type:?}");
     }
     let (snapshot, credentials) = capture_snapshot(

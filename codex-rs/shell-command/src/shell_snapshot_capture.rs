@@ -79,7 +79,7 @@ fn capture_script(
         ShellType::Zsh => zsh_snapshot_script(options.startup),
         ShellType::Bash => bash_snapshot_script(options.startup),
         ShellType::Sh => sh_snapshot_script(options.startup),
-        ShellType::PowerShell | ShellType::Cmd => return None,
+        ShellType::PowerShell | ShellType::Cmd | ShellType::Niu => return None,
     };
     let declarations = if options.declarations {
         exports::script(shell_type)

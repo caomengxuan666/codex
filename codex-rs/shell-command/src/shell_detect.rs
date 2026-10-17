@@ -10,6 +10,7 @@ pub enum ShellType {
     PowerShell,
     Sh,
     Cmd,
+    Niu,
 }
 
 impl ShellType {
@@ -20,6 +21,7 @@ impl ShellType {
             Self::PowerShell => "powershell",
             Self::Sh => "sh",
             Self::Cmd => "cmd",
+            Self::Niu => "niu",
         }
     }
 }
@@ -45,6 +47,7 @@ pub fn detect_shell_type(shell_path: impl AsRef<std::path::Path>) -> Option<Shel
         Some("bash") => Some(ShellType::Bash),
         Some("pwsh") => Some(ShellType::PowerShell),
         Some("powershell") => Some(ShellType::PowerShell),
+        Some("niu") => Some(ShellType::Niu),
         _ => {
             let shell_name = shell_path.file_stem();
             if let Some(shell_name) = shell_name {
@@ -325,6 +328,40 @@ fn get_cmd_shell() -> Option<DetectedShell> {
     })
 }
 
+#[cfg(windows)]
+const NIU_FALLBACK_PATHS: &[&str] = &[
+    r#"C:\Program Files\Niubash\niu.exe"#,
+    r#"C:\Program Files (x86)\Niubash\niu.exe"#,
+];
+
+#[cfg(windows)]
+fn get_local_app_data_niu_shell_path() -> Option<PathBuf> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+    file_exists(
+        std::path::Path::new(&local_app_data)
+            .join("Programs")
+            .join("Niubash")
+            .join("niu.exe")
+            .as_path(),
+    )
+}
+
+#[cfg(windows)]
+fn get_niu_shell() -> Option<DetectedShell> {
+    let shell_path = get_shell_path(ShellType::Niu, "niu", NIU_FALLBACK_PATHS)
+        .or_else(get_local_app_data_niu_shell_path);
+
+    shell_path.map(|shell_path| DetectedShell {
+        shell_type: ShellType::Niu,
+        shell_path,
+    })
+}
+
+#[cfg(not(windows))]
+fn get_niu_shell() -> Option<DetectedShell> {
+    None
+}
+
 pub fn ultimate_fallback_shell() -> DetectedShell {
     if cfg!(windows) {
         DetectedShell {
@@ -353,6 +390,7 @@ pub fn get_shell(shell_type: ShellType) -> Option<DetectedShell> {
         ShellType::PowerShell => get_powershell_shell(),
         ShellType::Sh => get_sh_shell(),
         ShellType::Cmd => get_cmd_shell(),
+        ShellType::Niu => get_niu_shell(),
     }
 }
 
@@ -362,7 +400,14 @@ pub fn default_user_shell() -> DetectedShell {
 
 pub fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> DetectedShell {
     if cfg!(windows) {
-        get_shell(ShellType::PowerShell).unwrap_or_else(ultimate_fallback_shell)
+        let user_default_shell = user_shell_path
+            .and_then(|shell| detect_shell_type(&shell))
+            .and_then(get_shell);
+
+        user_default_shell
+            .or_else(|| get_shell(ShellType::Niu))
+            .or_else(|| get_shell(ShellType::PowerShell))
+            .unwrap_or_else(ultimate_fallback_shell)
     } else {
         let user_default_shell = user_shell_path
             .and_then(|shell| detect_shell_type(&shell))
@@ -457,6 +502,14 @@ mod tests {
             detect_shell_type(PathBuf::from("powershell")),
             Some(ShellType::PowerShell)
         );
+        assert_eq!(
+            detect_shell_type(PathBuf::from("niu")),
+            Some(ShellType::Niu)
+        );
+        assert_eq!(
+            detect_shell_type(PathBuf::from("niu.exe")),
+            Some(ShellType::Niu)
+        );
         assert_eq!(detect_shell_type(PathBuf::from("fish")), None);
         assert_eq!(detect_shell_type(PathBuf::from("other")), None);
         assert_eq!(
@@ -504,5 +557,22 @@ mod tests {
             detect_shell_type(PathBuf::from("cmd.exe")),
             Some(ShellType::Cmd)
         );
+        assert_eq!(
+            detect_shell_type(PathBuf::from(if cfg!(windows) {
+                r"C:\Users\example\AppData\Local\Programs\Niu\niu.exe"
+            } else {
+                "/usr/local/bin/niu"
+            })),
+            Some(ShellType::Niu)
+        );
+    }
+
+    #[test]
+    fn windows_default_user_shell_prefers_niu_when_available() {
+        if !cfg!(windows) || get_shell(ShellType::Niu).is_none() {
+            return;
+        }
+
+        assert_eq!(default_user_shell().shell_type, ShellType::Niu);
     }
 }

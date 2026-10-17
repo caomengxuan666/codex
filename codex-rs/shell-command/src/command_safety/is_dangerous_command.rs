@@ -299,6 +299,15 @@ mod tests {
     }
 
     #[test]
+    fn forced_rm_in_niu_script_is_dangerous() {
+        let command = vec_str(&["niu", "-C", "echo ok && rm -rf /tmp/example"]);
+        assert_eq!(
+            dangerous_command_match(&command),
+            Some(DangerousCommandMatch::ForcedRm)
+        );
+    }
+
+    #[test]
     fn non_forced_or_non_literal_rm_is_not_dangerous() {
         for command in [
             vec_str(&["rm", "-r", "/tmp/example"]),

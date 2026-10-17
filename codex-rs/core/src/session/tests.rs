@@ -1705,7 +1705,17 @@ async fn user_shell_commands_do_not_inherit_managed_network_proxy() -> anyhow::R
     assert!(turn_context.network.is_some());
 
     #[cfg(windows)]
-    let command = r#"$val = $env:HTTP_PROXY; if ([string]::IsNullOrEmpty($val)) { $val = 'not-set' } ; [System.Console]::Write($val)"#.to_string();
+    // The Windows default shell depends on what is installed (PowerShell or a
+    // bash-like shell such as NiuBash), so match the command to its family.
+    let command = {
+        use codex_shell_command::shell_detect::ShellType;
+        match codex_shell_command::shell_detect::default_user_shell().shell_type {
+            ShellType::PowerShell | ShellType::Cmd => {
+                r#"$val = $env:HTTP_PROXY; if ([string]::IsNullOrEmpty($val)) { $val = 'not-set' } ; [System.Console]::Write($val)"#.to_string()
+            }
+            _ => r#"printf '%s' "${HTTP_PROXY:-not-set}""#.to_string(),
+        }
+    };
     #[cfg(not(windows))]
     let command = r#"sh -c "printf '%s' \"${HTTP_PROXY:-not-set}\"""#.to_string();
 

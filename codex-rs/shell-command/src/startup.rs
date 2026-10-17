@@ -25,6 +25,6 @@ fi
 fi
 "#
         }
-        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd => "",
+        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd | ShellType::Niu => "",
     }
 }

@@ -633,9 +633,29 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
     };
     // transform() may have made the inner command a Codex helper. Only that
     // helper needs materializing; an arbitrary workload such as cmd.exe does not.
-    if Path::new(program.as_str()) == sandbox_exe {
-        let helper = codex_windows_sandbox::resolve_exe_for_launch(sandbox_exe, codex_home);
+    let source = std::path::PathBuf::from(&program);
+    let materialized_helper = (Path::new(program.as_str()) == sandbox_exe)
+        .then(|| codex_windows_sandbox::resolve_exe_for_launch(sandbox_exe, codex_home));
+    if let Some(helper) = &materialized_helper {
         *program = helper.to_string_lossy().into_owned();
+    }
+
+    // The sandboxed child must be able to reach the workload it is asked to
+    // launch. An external shell such as niu.exe can live outside the configured
+    // read roots, and a materialized helper lands in the codex helper bin dir.
+    let mut additional_read_roots = Vec::new();
+    for path in [Some(source.as_path()), materialized_helper.as_deref()] {
+        let Some(path) = path else {
+            continue;
+        };
+        if path.is_absolute()
+            && let Some(parent) = path.parent()
+        {
+            let parent = parent.to_path_buf();
+            if !additional_read_roots.iter().any(|root| root == &parent) {
+                additional_read_roots.push(parent);
+            }
+        }
     }
 
     let inner_command = std::mem::take(&mut request.command);
@@ -700,6 +720,7 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
             proxy_settings_mode,
             read_roots_override,
             read_roots_include_platform_defaults,
+            additional_read_roots.as_slice(),
             write_roots_override,
             deny_read_paths_override,
             deny_write_paths_override,

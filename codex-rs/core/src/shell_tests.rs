@@ -142,6 +142,19 @@ fn derive_exec_args() {
         test_powershell_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
         vec!["pwsh.exe", "-Command", "echo hello"]
     );
+
+    let test_niu_shell = Shell {
+        shell_type: ShellType::Niu,
+        shell_path: PathBuf::from("niu.exe"),
+    };
+    assert_eq!(
+        test_niu_shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
+        vec!["niu.exe", "-c", "echo hello"]
+    );
+    assert_eq!(
+        test_niu_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
+        vec!["niu.exe", "-C", "echo hello"]
+    );
 }
 
 /// Diagnostics and `$LINENO` must refer to the original script, even with newlines in the package path.

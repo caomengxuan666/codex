@@ -731,7 +731,7 @@ async fn warn_if_remote_credential_masking_unavailable(
     } else if match req.shell.shell.shell_type {
         ShellType::Bash => req.shell.use_login_shell || req.shell_snapshot.is_some(),
         ShellType::Zsh => !req.shell.use_login_shell || req.shell_snapshot.is_none(),
-        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd => true,
+        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd | ShellType::Niu => true,
     } {
         format!(
             "Credential masking is unavailable for this shell startup on environment `{environment_id}`. This command will run with unmasked credentials."

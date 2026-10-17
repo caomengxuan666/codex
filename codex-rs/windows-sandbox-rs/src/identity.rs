@@ -271,6 +271,7 @@ pub fn require_logon_sandbox_creds(
     codex_home: &Path,
     read_roots_override: Option<&[PathBuf]>,
     read_roots_include_platform_defaults: bool,
+    additional_read_roots: &[PathBuf],
     write_roots_override: Option<&[PathBuf]>,
     deny_read_paths_override: &[PathBuf],
     deny_write_paths_override: &[PathBuf],
@@ -278,11 +279,12 @@ pub fn require_logon_sandbox_creds(
     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
 ) -> Result<SandboxCreds> {
     let runtime = crate::setup::current_setup_runtime();
-    let needed_read = read_roots_override
+    let mut needed_read = read_roots_override
         .map(<[PathBuf]>::to_vec)
         .unwrap_or_else(|| {
             gather_read_roots(command_cwd, permissions, env_map, codex_home, runtime)
         });
+    needed_read.extend(additional_read_roots.iter().cloned());
     let needed_write = write_roots_override
         .map(<[PathBuf]>::to_vec)
         .unwrap_or_else(|| gather_write_roots_for_permissions(permissions, command_cwd, env_map));
@@ -487,6 +489,7 @@ pub(crate) fn refresh_logon_sandbox_creds(
     codex_home: &Path,
     read_roots_override: Option<&[PathBuf]>,
     read_roots_include_platform_defaults: bool,
+    additional_read_roots: &[PathBuf],
     write_roots_override: Option<&[PathBuf]>,
     deny_read_paths_override: &[PathBuf],
     deny_write_paths_override: &[PathBuf],
@@ -501,6 +504,7 @@ pub(crate) fn refresh_logon_sandbox_creds(
         codex_home,
         read_roots_override,
         read_roots_include_platform_defaults,
+        additional_read_roots,
         write_roots_override,
         deny_read_paths_override,
         deny_write_paths_override,
