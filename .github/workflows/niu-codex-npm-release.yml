@@ -1,0 +1,143 @@
+name: niu-codex-npm-release
+
+# Builds the release artifacts for the @cmx666/codex npm packages from a pinned
+# commit, using upstream's own package builder so the layout matches
+# codex-rs/scripts/codex_package/layout.py exactly.
+#
+# Why CI and not a local build: the version string is compiled in
+# (CARGO_PKG_VERSION), so npm metadata and `codex --version` only agree if the
+# binaries are built from the same revision that carries the bumped
+# [workspace.package].version. Building 300 MB of Rust locally makes that easy
+# to get wrong.
+#
+# Publish order matters. The meta package ships only bin/codex.js; its binaries
+# arrive through optionalDependencies as `npm:@cmx666/codex@<version>-win32-x64`.
+# Publish the platform package first, or the meta package installs into a
+# "missing optional dependency" error.
+#
+# Setup: add an npm automation token for the @cmx666 scope as the repository
+# secret NPM_TOKEN before running with publish=true.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to npm (requires the NPM_TOKEN secret)"
+        type: boolean
+        default: false
+      npm_tag:
+        description: "dist-tag for the meta package"
+        type: string
+        default: "latest"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build, package, and optionally publish
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            codex-rs/target
+          key: cargo-windows-x64-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: cargo-windows-x64-
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Read and guard the release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' codex-rs/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: $version"
+          # 0.0.0 is DEV_BUILD_VERSION_SENTINEL in windows-sandbox-rs: it selects a
+          # mtime-based helper suffix and marks an unreleased tree. Refuse to ship it.
+          if [ "$version" = "0.0.0" ]; then
+            echo "::error::codex-rs/Cargo.toml still carries the 0.0.0 dev sentinel. Bump it in the release commit."
+            exit 1
+          fi
+
+      # v8's build script creates a directory symlink under target/, which needs
+      # Developer Mode or an elevated shell on Windows, and would otherwise run a
+      # binding generator that wants libclang. Upstream ships prebuilt v8 static
+      # libraries and pre-generated bindings for each target; this in-repo action
+      # downloads and checksums them and exports RUSTY_V8_ARCHIVE and
+      # RUSTY_V8_SRC_BINDING_PATH, which skips both problems.
+      - name: Configure prebuilt rusty_v8
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-pc-windows-msvc
+
+      # Build without --target so artifacts land in codex-rs/target/release,
+      # which is where the package builder looks by default on this host.
+      - name: Build the release binaries
+        working-directory: codex-rs
+        run: |
+          cargo build --release --package codex-cli --bin codex
+          cargo build --release --package codex-windows-sandbox --bins
+          cargo build --release --package codex-code-mode-host --bin codex-code-mode-host
+
+      - name: Assemble the canonical package directory and the release zip
+        shell: bash
+        run: |
+          python scripts/build_codex_package.py \
+            --target x86_64-pc-windows-msvc \
+            --variant codex \
+            --cargo-profile release \
+            --package-dir "$RUNNER_TEMP/vendor/x86_64-pc-windows-msvc" \
+            --archive-output "$RUNNER_TEMP/niu-codex-${{ steps.version.outputs.version }}-windows-x86_64.zip" \
+            --entrypoint-bin "codex-rs/target/release/codex.exe" \
+            --code-mode-host-bin "codex-rs/target/release/codex-code-mode-host.exe" \
+            --codex-command-runner-bin "codex-rs/target/release/codex-command-runner.exe" \
+            --codex-windows-sandbox-setup-bin "codex-rs/target/release/codex-windows-sandbox-setup.exe" \
+            --force
+          # --rg-bin is omitted on purpose: the builder fetches its pinned ripgrep.
+
+      - name: Stage and verify the npm packages
+        shell: bash
+        run: |
+          sh scripts/niu/verify-npm-package.sh \
+            "${{ steps.version.outputs.version }}" \
+            "$RUNNER_TEMP/vendor" \
+            "$RUNNER_TEMP/npm"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: niu-codex-${{ steps.version.outputs.version }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/niu-codex-*.zip
+            ${{ runner.temp }}/npm/*.tgz
+
+      - name: Publish to npm
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          platform="$(ls "$RUNNER_TEMP"/npm/cmx666-codex-"$version"-win32-x64.tgz)"
+          meta="$(ls "$RUNNER_TEMP"/npm/cmx666-codex-"$version".tgz)"
+          # Platform first: the meta package depends on it.
+          npm publish "$platform" --tag win32-x64 --access public
+          npm publish "$meta" --tag "${{ inputs.npm_tag }}" --access public
+          echo "published @cmx666/codex@$version (platform: win32-x64, meta tag: ${{ inputs.npm_tag }})"
