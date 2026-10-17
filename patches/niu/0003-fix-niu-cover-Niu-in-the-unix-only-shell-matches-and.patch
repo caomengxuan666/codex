@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: caomengxuan666 <2507560089@qq.com>
+Date: Sat, 17 Oct 2026 15:47:26 +0800
+Subject: [PATCH 3/5] fix(niu): cover Niu in the unix-only shell matches and
+ pin the wrapper boundary
+
+Adding a ShellType variant only breaks builds on platforms that compile the
+match. Two of them live behind #[cfg(unix)], so they never compile on the
+Windows runner this port was checked on and would have failed Linux and macOS CI:
+
+- exec-server/src/shell_snapshot.rs: the restore-flag match ended at
+  `ShellType::PowerShell | ShellType::Cmd => unreachable!()`.
+- exec-server/src/shell_snapshot_file.rs: the snapshot-transport match ended at
+  `ShellType::Sh | ShellType::PowerShell | ShellType::Cmd => { ... }`.
+
+Both now list Niu alongside the other unsupported shells. The audit is
+believed complete rather than sampled: a match over ShellType only compiles if
+it names every variant or has a wildcard arm, so enumerating every
+`ShellType::Cmd` and `Self::Cmd` site finds every remaining hole. All other
+sites either already had the arm or end in a wildcard.
+
+The remaining safety question is settled by the fork's own plan doc, which says
+NiuBash exposes -C instead of bash/zsh-style -lc and that Codex "should not
+depend on it" until NiuBash adds it. So extract_bash_command's accepted flag set
+is correct as written, and accepting a flag NiuBash rejects would be the actual
+bug: the wrapped script would pass through unextracted and therefore
+uninspected. Recorded that reasoning at the match and pinned it with
+niu_wrapper_flags_match_the_shell_it_wraps, which asserts -C/-c/--repl-command
+extract and -lc/-l/-i/--login do not.
+---
+ codex-rs/exec-server/src/shell_snapshot.rs    |  2 +-
+ .../exec-server/src/shell_snapshot_file.rs    |  2 +-
+ codex-rs/shell-command/src/bash.rs            | 29 +++++++++++++++++++
+ 3 files changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/codex-rs/exec-server/src/shell_snapshot.rs b/codex-rs/exec-server/src/shell_snapshot.rs
+index 55a831c7cb..3dbc323293 100644
+--- a/codex-rs/exec-server/src/shell_snapshot.rs
++++ b/codex-rs/exec-server/src/shell_snapshot.rs
+@@ -356,7 +356,7 @@ impl ShellSnapshotCache {
+             ShellType::Bash => ("-pc", "set +o privileged\n"),
+             ShellType::Zsh => ("-fc", "setopt RCS\n"),
+             ShellType::Sh => ("-c", ""),
+-            ShellType::PowerShell | ShellType::Cmd => unreachable!(),
++            ShellType::PowerShell | ShellType::Cmd | ShellType::Niu => unreachable!(),
+         };
+         prepared.command[shell_start + 1] = shell_flag.to_string();
+         prepared.command[shell_start + 2] = if protected {
+diff --git a/codex-rs/exec-server/src/shell_snapshot_file.rs b/codex-rs/exec-server/src/shell_snapshot_file.rs
+index 08ff6df971..7f42a8b434 100644
+--- a/codex-rs/exec-server/src/shell_snapshot_file.rs
++++ b/codex-rs/exec-server/src/shell_snapshot_file.rs
+@@ -34,7 +34,7 @@ pub(super) fn materialize(shell: ShellType, state: &str) -> io::Result<File> {
+         ShellType::Zsh => format!(
+             "__codex_snapshot_fd={fd}\nexec {{__codex_snapshot_fd}}<&-\nunset __codex_snapshot_fd\n"
+         ),
+-        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd => {
++        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd | ShellType::Niu => {
+             return Err(io::Error::other("unsupported snapshot shell"));
+         }
+     };
+diff --git a/codex-rs/shell-command/src/bash.rs b/codex-rs/shell-command/src/bash.rs
+index 5803147500..08a0cfd9c5 100644
+--- a/codex-rs/shell-command/src/bash.rs
++++ b/codex-rs/shell-command/src/bash.rs
+@@ -112,6 +112,11 @@ pub fn extract_bash_command(command: &[String]) -> Option<(&str, &str)> {
+         Some(ShellType::Zsh | ShellType::Bash | ShellType::Sh) => {
+             matches!(flag.as_str(), "-lc" | "-c")
+         }
++        // NiuBash exposes -C for profile-aware runs and -c for plain runs, not
++        // bash/zsh-style -lc. Accepting a flag NiuBash rejects would let that
++        // script pass through unextracted and therefore uninspected, so keep
++        // this set in step with the shell: add "-lc" only once NiuBash supports
++        // it (codex-rs/docs/niu-first-class-shell-plan.md).
+         Some(ShellType::Niu) => matches!(flag.as_str(), "-C" | "--repl-command" | "-c"),
+         _ => false,
+     };
+@@ -540,6 +545,30 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn niu_wrapper_flags_match_the_shell_it_wraps() {
++        // Security boundary: a wrapper flag NiuBash does not support must not be
++        // treated as a shell wrapper, because the inner script would then skip
++        // command parsing and inspection entirely. NiuBash exposes -C and -c
++        // (plus --repl-command for REPL calls) and deliberately has no -lc.
++        for flag in ["-C", "-c", "--repl-command"] {
++            let command = vec!["niu".to_string(), flag.to_string(), "ls".to_string()];
++            assert_eq!(
++                extract_bash_command(&command),
++                Some(("niu", "ls")),
++                "{flag} must extract the wrapped script"
++            );
++        }
++        for flag in ["-lc", "-l", "-i", "--login"] {
++            let command = vec!["niu".to_string(), flag.to_string(), "ls".to_string()];
++            assert_eq!(
++                extract_bash_command(&command),
++                None,
++                "{flag} is not a NiuBash wrapper flag and must not be treated as one"
++            );
++        }
++    }
++
+     #[test]
+     fn accepts_concatenated_flag_and_value() {
+         // Test case: -g"*.py" (flag directly concatenated with quoted value)

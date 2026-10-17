@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: caomengxuan666 <2507560089@qq.com>
+Date: Sat, 17 Oct 2026 15:49:17 +0800
+Subject: [PATCH 4/5] fix(niu): exclude the patch artifacts from the exported
+ series
+
+`export` ran `git format-patch upstream/main..HEAD` over the whole tree, and
+patches/ is tracked, so the series contained the commit that writes the series.
+That is self-referential: the commit's own patch file can never be reproduced by
+applying the series, so `check` could only ever report "needed a three-way merge"
+and never "patches apply exactly". The guard's strongest signal was unreachable.
+
+patches/ is metadata about the delta, not part of it, so exclude it from the
+series. Regenerate it locally with `export` and `pin` after applying.
+---
+ scripts/niu/sync-upstream.sh | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/scripts/niu/sync-upstream.sh b/scripts/niu/sync-upstream.sh
+index afc4a22473..1113c9761e 100644
+--- a/scripts/niu/sync-upstream.sh
++++ b/scripts/niu/sync-upstream.sh
+@@ -101,8 +101,14 @@ cmd_rebase() {
+ cmd_export() {
+   mkdir -p "$PATCH_DIR"
+   rm -f "$PATCH_DIR"/*.patch
++  # Exclude patches/ from the series. It is metadata *about* the delta, not part
++  # of it: including it makes the series self-referential (the commit that writes
++  # these files is itself one of them, so the last file can never be reproduced)
++  # and `check` can then only ever report a three-way merge rather than an exact
++  # apply. Regenerate it locally with `export`/`pin` after applying the series.
+   git format-patch --no-signature --zero-commit \
+-    --output-directory "$PATCH_DIR" "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH..HEAD" >/dev/null
++    --output-directory "$PATCH_DIR" "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH..HEAD" \
++    -- . ':(exclude)patches' >/dev/null
+   echo "wrote $(ls "$PATCH_DIR"/*.patch | wc -l) patch(es) to $PATCH_DIR"
+   ls -1 "$PATCH_DIR"
+ }
