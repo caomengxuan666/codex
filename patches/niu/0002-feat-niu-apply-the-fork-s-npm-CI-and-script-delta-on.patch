@@ -1,0 +1,1381 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: caomengxuan666 <2507560089@qq.com>
+Date: Sat, 17 Oct 2026 15:17:43 +0800
+Subject: [PATCH 2/2] feat(niu): apply the fork's npm, CI and script delta on
+ the new base
+
+Everything the fork owns outside codex-rs is either new upstream (the niu
+workflows, scripts/niu, RELEASE.md) or a small semantic delta that upstream has
+since reformatted, so the npm files are taken from upstream and the fork's real
+intent is re-applied on top rather than reverted wholesale:
+
+- `@openai/codex` -> `@cmx666/codex` throughout codex-cli, plus the repository
+  URL and package name in codex-cli/package.json. The whitespace-insensitive
+  diff showed the fork's 249/453/22-line rewrites were line endings and
+  formatting around this rename.
+- Upstream's newer codex-cli is kept, including the `vp` (Vite+) install-manager
+  branch and the pnpm 10.34.5 bump.
+- Upstream's Vite+ detection read `packages/@openai/codex.json` while asserting
+  the recorded name is `@cmx666/codex`, so it could never match for this fork.
+  Renamed that path to match.
+
+The niu workflows are taken as-is; the release-version guard and the sccache
+changes from the previous branch are unchanged.
+---
+ .github/workflows/niu-codex-npm-release.yml   | 289 ++++++++++++++++++
+ .github/workflows/niu-codex-windows-build.yml | 210 +++++++++++++
+ .github/workflows/niu-patch-guard.yml         |  80 +++++
+ README.md                                     |  20 ++
+ RELEASE.md                                    | 163 ++++++++++
+ codex-cli/bin/codex.js                        |  34 +--
+ codex-cli/package.json                        |   4 +-
+ codex-cli/scripts/README.md                   |   2 +-
+ codex-cli/scripts/build_npm_package.py        |  18 +-
+ scripts/niu/sync-upstream.sh                  | 188 ++++++++++++
+ scripts/niu/verify-npm-package.sh             | 162 ++++++++++
+ 11 files changed, 1141 insertions(+), 29 deletions(-)
+ create mode 100644 .github/workflows/niu-codex-npm-release.yml
+ create mode 100644 .github/workflows/niu-codex-windows-build.yml
+ create mode 100644 .github/workflows/niu-patch-guard.yml
+ create mode 100644 RELEASE.md
+ create mode 100644 scripts/niu/sync-upstream.sh
+ create mode 100644 scripts/niu/verify-npm-package.sh
+
+diff --git a/.github/workflows/niu-codex-npm-release.yml b/.github/workflows/niu-codex-npm-release.yml
+new file mode 100644
+index 0000000000..8554865ec1
+--- /dev/null
++++ b/.github/workflows/niu-codex-npm-release.yml
+@@ -0,0 +1,289 @@
++name: niu-codex-npm-release
++
++# Builds the release artifacts for the @cmx666/codex npm packages from a pinned
++# commit, using upstream's own package builder so the layout matches
++# codex-rs/scripts/codex_package/layout.py exactly.
++#
++# Why CI and not a local build: the version string is compiled in
++# (CARGO_PKG_VERSION), so npm metadata and `codex --version` only agree if the
++# binaries are built from the same revision that carries the bumped
++# [workspace.package].version. Building 300 MB of Rust locally makes that easy
++# to get wrong.
++#
++# Caching: the codex-cli release build is ~59 minutes cold on a windows-latest
++# runner, so it must never be cold twice. Compiled objects go through sccache's
++# local disk cache, which the workflow persists with actions/cache, and the
++# cargo home is cached separately. `target/` itself is deliberately NOT cached:
++# it is 8 GB+ here, which does not fit GitHub's 10 GB per-repo cache budget.
++# Every cache save is `if: always()` because actions/cache's default post step
++# only saves on job success, and the package/verify/publish steps at the end of
++# this job can fail on their own.
++#
++# Publish order matters. The meta package ships only bin/codex.js; its binaries
++# arrive through optionalDependencies as `npm:@cmx666/codex@<version>-win32-x64`.
++# Publish the platform package first, or the meta package installs into a
++# "missing optional dependency" error.
++#
++# Setup: add an npm automation token for the @cmx666 scope as the repository
++# secret NPM_TOKEN before running with publish=true.
++
++on:
++  workflow_dispatch:
++    inputs:
++      publish:
++        description: "Publish to npm (requires the NPM_TOKEN secret)"
++        type: boolean
++        default: false
++      npm_tag:
++        description: "dist-tag for the meta package"
++        type: string
++        default: "latest"
++
++permissions:
++  contents: read
++
++jobs:
++  release:
++    name: Build, package, and optionally publish
++    runs-on: windows-latest
++    timeout-minutes: 360
++    # A cold build occupies a runner for about an hour. Never run two release
++    # builds at once: they compete for the same cache entries and can publish
++    # the same version twice.
++    concurrency:
++      group: niu-codex-npm-release
++      cancel-in-progress: false
++    env:
++      # Incremental artifacts are useless across CI jobs and only inflate the cache.
++      CARGO_INCREMENTAL: "0"
++      # sccache caches compiled crates in a local directory that the workflow
++      # persists with actions/cache. Keep the budget well under GitHub's 10 GB
++      # per-repo limit, which the Bazel caches also draw on, so a single cache
++      # entry cannot evict them.
++      SCCACHE_CACHE_SIZE: 4G
++      # Surface sccache's own warnings. Without this a broken cache degrades
++      # every build to a cold one without saying so.
++      SCCACHE_LOG: warn
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: dtolnay/rust-toolchain@1.95.0
++        with:
++          targets: x86_64-pc-windows-msvc
++
++      # Compiled objects live in sccache, not in `target/`. A whole-`target`
++      # cache entry is 8 GB+ for this workspace, which does not fit GitHub's
++      # 10 GB per-repo cache budget and evicts the Bazel caches when it is
++      # saved. Only the cargo home (small) is cached as a directory.
++      - name: Compute cache key
++        id: cachekey
++        shell: bash
++        run: |
++          set -euo pipefail
++          echo "hash=$(cat codex-rs/Cargo.lock codex-rs/rust-toolchain.toml codex-rs/.cargo/config.toml | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
++
++      - name: Restore cargo home cache
++        id: cargo_home_restore
++        uses: actions/cache/restore@v4
++        with:
++          path: |
++            ~/.cargo/registry/index/
++            ~/.cargo/registry/cache/
++            ~/.cargo/git/db/
++          key: cargo-home-windows-x64-${{ steps.cachekey.outputs.hash }}
++          restore-keys: |
++            cargo-home-windows-x64-
++
++      # sccache intentionally uses its local disk cache only. Its GitHub Actions
++      # cache backend is unusable from here: `run` steps on this runner never
++      # receive ACTIONS_CACHE_URL / ACTIONS_RUNTIME_TOKEN (verified 2026-10-17,
++      # all four cache variables empty), and sccache treats the missing endpoint
++      # as a fatal server startup error ("cache url for ghac not found") instead
++      # of degrading, so requesting ghac would kill the release build. ghac also
++      # drops writes on HTTP 429 without retrying (mozilla/sccache#2821).
++      #
++      # The version belongs in `tool`: taiki-e/install-action has no `version`
++      # input and silently installs latest when one is passed. Pinned rather than
++      # floating so the on-disk cache format is stable. 0.18.0's open panic is
++      # x64 Linux only (mozilla/sccache#2869); this runner is Windows x64.
++      - name: Install sccache
++        uses: taiki-e/install-action@v2
++        with:
++          tool: sccache@0.18.0
++
++      - name: Point sccache at a cacheable directory and wrap rustc
++        shell: bash
++        run: |
++          set -euo pipefail
++          sccache_dir="${RUNNER_TEMP}/sccache"
++          wrapper="$(command -v sccache)"
++          if [[ "${RUNNER_OS}" == "Windows" ]] && command -v cygpath >/dev/null 2>&1; then
++            # sccache and actions/cache both take native paths on Windows.
++            sccache_dir="$(cygpath -w "${sccache_dir}")"
++            wrapper="$(cygpath -w "${wrapper}")"
++          fi
++          echo "SCCACHE_DIR=${sccache_dir}" >> "$GITHUB_ENV"
++          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
++          echo "CARGO_BUILD_RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
++          echo "SCCACHE_DIR=${sccache_dir}"
++          echo "RUSTC_WRAPPER=${wrapper}"
++
++      - name: Restore sccache cache
++        id: sccache_restore
++        uses: actions/cache/restore@v4
++        with:
++          path: ${{ env.SCCACHE_DIR }}
++          key: sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-${{ github.run_id }}
++          restore-keys: |
++            sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-
++            sccache-windows-x64-
++
++      - uses: actions/setup-node@v4
++        with:
++          node-version: 22
++          registry-url: "https://registry.npmjs.org"
++
++      - name: Read and guard the release version
++        id: version
++        shell: bash
++        run: |
++          set -euo pipefail
++          version="$(grep -m1 '^version' codex-rs/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
++          echo "version=$version" >> "$GITHUB_OUTPUT"
++          echo "Cargo.toml version: $version"
++          # 0.0.0 is DEV_BUILD_VERSION_SENTINEL in windows-sandbox-rs: it selects a
++          # mtime-based helper suffix and marks an unreleased tree. Refuse to ship it.
++          if [ "$version" = "0.0.0" ]; then
++            echo "::error::codex-rs/Cargo.toml still carries the 0.0.0 dev sentinel. Bump it in the release commit."
++            exit 1
++          fi
++
++      # v8's build script creates a directory symlink under target/, which needs
++      # Developer Mode or an elevated shell on Windows, and would otherwise run a
++      # binding generator that wants libclang. Upstream ships prebuilt v8 static
++      # libraries and pre-generated bindings for each target; this in-repo action
++      # downloads and checksums them and exports RUSTY_V8_ARCHIVE and
++      # RUSTY_V8_SRC_BINDING_PATH, which skips both problems.
++      - name: Configure prebuilt rusty_v8
++        uses: ./.github/actions/setup-rusty-v8
++        with:
++          target: x86_64-pc-windows-msvc
++
++      # Build without --target so artifacts land in codex-rs/target/release,
++      # which is where the package builder looks by default on this host.
++      #
++      # One cargo invocation for every binary, matching upstream's
++      # rust-release-windows.yml. Three separate invocations re-unified features
++      # per call, so shared crates were compiled two or three times (~10 min of
++      # the old 68-minute build step).
++      - name: Build the release binaries
++        working-directory: codex-rs
++        shell: bash
++        run: |
++          set -euo pipefail
++          cargo build --release \
++            --package codex-cli --bin codex \
++            --package codex-windows-sandbox --bins \
++            --package codex-code-mode-host --bin codex-code-mode-host
++
++      # Cache health is deliberately decoupled from job success: actions/cache's
++      # post step only saves on success, and this workflow has downstream steps
++      # (package/verify/publish) that fail independently of the build.
++      - name: Report sccache stats
++        if: always() && !cancelled()
++        shell: bash
++        continue-on-error: true
++        run: |
++          set -euo pipefail
++          stats="$(sccache --show-stats || true)"
++          printf '%s\n' "$stats"
++          {
++            echo "### sccache stats — x86_64-pc-windows-msvc (release)"
++            echo
++            echo '```'
++            printf '%s\n' "$stats"
++            echo '```'
++          } >> "$GITHUB_STEP_SUMMARY"
++          # A cache that is configured but never hit looks exactly like a cold
++          # build, and that costs an hour every run. Flag it loudly, but never
++          # fail the job: a broken cache must not block a release.
++          if grep -Eq 'errors[[:space:]]+[1-9][0-9]*' <<<"$stats"; then
++            echo "::warning title=sccache cache errors::sccache reported cache errors; the cache backend is probably not working, so builds will stay cold."
++          fi
++          if grep -Eq '^Compile requests[[:space:]]+0$' <<<"$stats"; then
++            echo "::warning title=sccache is not wrapping rustc::sccache saw zero compile requests; RUSTC_WRAPPER is probably not reaching cargo."
++          fi
++
++      - name: Save cargo home cache
++        if: always() && !cancelled() && steps.cargo_home_restore.outputs.cache-hit != 'true'
++        continue-on-error: true
++        uses: actions/cache/save@v4
++        with:
++          path: |
++            ~/.cargo/registry/index/
++            ~/.cargo/registry/cache/
++            ~/.cargo/git/db/
++          key: cargo-home-windows-x64-${{ steps.cachekey.outputs.hash }}
++
++      - name: Save sccache cache
++        if: always() && !cancelled()
++        continue-on-error: true
++        uses: actions/cache/save@v4
++        with:
++          path: ${{ env.SCCACHE_DIR }}
++          key: sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-${{ github.run_id }}
++
++      - name: Assemble the canonical package directory and the release zip
++        id: assemble
++        shell: bash
++        run: |
++          python scripts/build_codex_package.py \
++            --target x86_64-pc-windows-msvc \
++            --variant codex \
++            --cargo-profile release \
++            --package-dir "$RUNNER_TEMP/vendor/x86_64-pc-windows-msvc" \
++            --archive-output "$RUNNER_TEMP/niu-codex-${{ steps.version.outputs.version }}-windows-x86_64.zip" \
++            --entrypoint-bin "codex-rs/target/release/codex.exe" \
++            --code-mode-host-bin "codex-rs/target/release/codex-code-mode-host.exe" \
++            --codex-command-runner-bin "codex-rs/target/release/codex-command-runner.exe" \
++            --codex-windows-sandbox-setup-bin "codex-rs/target/release/codex-windows-sandbox-setup.exe" \
++            --force
++          # --rg-bin is omitted on purpose: the builder fetches its pinned ripgrep.
++
++      - name: Stage and verify the npm packages
++        shell: bash
++        run: |
++          sh scripts/niu/verify-npm-package.sh \
++            "${{ steps.version.outputs.version }}" \
++            "$RUNNER_TEMP/vendor" \
++            "$RUNNER_TEMP/npm"
++
++      # Runs even when verification fails: the packaged zip is the expensive
++      # part of this job and must stay downloadable for inspection or for a
++      # publish that is retried without a rebuild. Guarded on the assemble step
++      # rather than the build step so a failed build does not report a
++      # misleading "no files found" error here.
++      - name: Upload artifacts
++        if: always() && !cancelled() && steps.assemble.outcome == 'success'
++        uses: actions/upload-artifact@v4
++        with:
++          name: niu-codex-${{ steps.version.outputs.version }}
++          if-no-files-found: error
++          path: |
++            ${{ runner.temp }}/niu-codex-*.zip
++            ${{ runner.temp }}/npm/*.tgz
++
++      - name: Publish to npm
++        if: ${{ inputs.publish }}
++        shell: bash
++        env:
++          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
++        run: |
++          set -euo pipefail
++          version="${{ steps.version.outputs.version }}"
++          platform="$(ls "$RUNNER_TEMP"/npm/cmx666-codex-"$version"-win32-x64.tgz)"
++          meta="$(ls "$RUNNER_TEMP"/npm/cmx666-codex-"$version".tgz)"
++          # Platform first: the meta package depends on it.
++          npm publish "$platform" --tag win32-x64 --access public
++          npm publish "$meta" --tag "${{ inputs.npm_tag }}" --access public
++          echo "published @cmx666/codex@$version (platform: win32-x64, meta tag: ${{ inputs.npm_tag }})"
+diff --git a/.github/workflows/niu-codex-windows-build.yml b/.github/workflows/niu-codex-windows-build.yml
+new file mode 100644
+index 0000000000..e502b6763f
+--- /dev/null
++++ b/.github/workflows/niu-codex-windows-build.yml
+@@ -0,0 +1,210 @@
++name: niu-codex-windows-build
++
++on:
++  workflow_dispatch:
++    inputs:
++      artifact_name:
++        description: "Artifact name"
++        required: false
++        default: "niu-codex-preview-windows-x86_64"
++      release_tag:
++        description: "Optional GitHub release tag to upload the zip to"
++        required: false
++        default: ""
++
++permissions:
++  contents: write
++
++jobs:
++  build:
++    name: Build Windows x64 preview
++    runs-on: windows-latest
++    timeout-minutes: 120
++    # A cold build occupies a runner for about an hour. Never run two builds at
++    # once: they compete for the same cache entries.
++    concurrency:
++      group: niu-codex-windows-build
++      cancel-in-progress: false
++    env:
++      # Incremental artifacts are useless across CI jobs and only inflate the cache.
++      CARGO_INCREMENTAL: "0"
++      # sccache caches compiled crates in a local directory that the workflow
++      # persists with actions/cache. Keep the budget well under GitHub's 10 GB
++      # per-repo limit, which the Bazel caches also draw on, so a single cache
++      # entry cannot evict them.
++      SCCACHE_CACHE_SIZE: 4G
++      # Surface sccache's own warnings. Without this a broken cache degrades
++      # every build to a cold one without saying so.
++      SCCACHE_LOG: warn
++    defaults:
++      run:
++        working-directory: codex-rs
++
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: dtolnay/rust-toolchain@1.95.0
++        with:
++          targets: x86_64-pc-windows-msvc
++
++      # Compiled objects live in sccache, not in `target/`. A whole-`target`
++      # cache entry is 8 GB+ for this workspace, which does not fit GitHub's
++      # 10 GB per-repo cache budget and evicts the Bazel caches when it is
++      # saved. Only the cargo home (small) is cached as a directory.
++      - name: Compute cache key
++        id: cachekey
++        shell: bash
++        run: |
++          set -euo pipefail
++          echo "hash=$(cat Cargo.lock rust-toolchain.toml .cargo/config.toml | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
++
++      - name: Restore cargo home cache
++        id: cargo_home_restore
++        uses: actions/cache/restore@v4
++        with:
++          path: |
++            ~/.cargo/registry/index/
++            ~/.cargo/registry/cache/
++            ~/.cargo/git/db/
++          key: cargo-home-windows-x64-${{ steps.cachekey.outputs.hash }}
++          restore-keys: |
++            cargo-home-windows-x64-
++
++      # sccache intentionally uses its local disk cache only. Its GitHub Actions
++      # cache backend is unusable from here: `run` steps on this runner never
++      # receive ACTIONS_CACHE_URL / ACTIONS_RUNTIME_TOKEN (verified 2026-10-17,
++      # all four cache variables empty), and sccache treats the missing endpoint
++      # as a fatal server startup error ("cache url for ghac not found") instead
++      # of degrading, so requesting ghac would kill the build. ghac also drops
++      # writes on HTTP 429 without retrying (mozilla/sccache#2821).
++      #
++      # The version belongs in `tool`: taiki-e/install-action has no `version`
++      # input and silently installs latest when one is passed. Pinned rather than
++      # floating so the on-disk cache format is stable. 0.18.0's open panic is
++      # x64 Linux only (mozilla/sccache#2869); this runner is Windows x64.
++      - name: Install sccache
++        uses: taiki-e/install-action@v2
++        with:
++          tool: sccache@0.18.0
++
++      - name: Point sccache at a cacheable directory and wrap rustc
++        shell: bash
++        run: |
++          set -euo pipefail
++          sccache_dir="${RUNNER_TEMP}/sccache"
++          wrapper="$(command -v sccache)"
++          if [[ "${RUNNER_OS}" == "Windows" ]] && command -v cygpath >/dev/null 2>&1; then
++            # sccache and actions/cache both take native paths on Windows.
++            sccache_dir="$(cygpath -w "${sccache_dir}")"
++            wrapper="$(cygpath -w "${wrapper}")"
++          fi
++          echo "SCCACHE_DIR=${sccache_dir}" >> "$GITHUB_ENV"
++          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
++          echo "CARGO_BUILD_RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
++          echo "SCCACHE_DIR=${sccache_dir}"
++          echo "RUSTC_WRAPPER=${wrapper}"
++
++      - name: Restore sccache cache
++        id: sccache_restore
++        uses: actions/cache/restore@v4
++        with:
++          path: ${{ env.SCCACHE_DIR }}
++          key: sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-${{ github.run_id }}
++          restore-keys: |
++            sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-
++            sccache-windows-x64-
++
++      # One cargo invocation for both binaries: separate calls re-unify features
++      # and recompile shared crates from scratch each time.
++      - name: Build Codex CLI and sandbox helpers
++        shell: pwsh
++        run: |
++          cargo build --target x86_64-pc-windows-msvc --release `
++            --package codex-cli --bin codex `
++            --package codex-windows-sandbox --bins
++
++      # Cache health is deliberately decoupled from job success: actions/cache's
++      # post step only saves on success, and this workflow has downstream steps
++      # (stage/upload/release) that fail independently of the build.
++      - name: Report sccache stats
++        if: always() && !cancelled()
++        shell: bash
++        continue-on-error: true
++        run: |
++          set -euo pipefail
++          stats="$(sccache --show-stats || true)"
++          printf '%s\n' "$stats"
++          {
++            echo "### sccache stats — x86_64-pc-windows-msvc (release)"
++            echo
++            echo '```'
++            printf '%s\n' "$stats"
++            echo '```'
++          } >> "$GITHUB_STEP_SUMMARY"
++          # A cache that is configured but never hit looks exactly like a cold
++          # build, and that costs an hour every run. Flag it loudly, but never
++          # fail the job: a broken cache must not block a release.
++          if grep -Eq 'errors[[:space:]]+[1-9][0-9]*' <<<"$stats"; then
++            echo "::warning title=sccache cache errors::sccache reported cache errors; the cache backend is probably not working, so builds will stay cold."
++          fi
++          if grep -Eq '^Compile requests[[:space:]]+0$' <<<"$stats"; then
++            echo "::warning title=sccache is not wrapping rustc::sccache saw zero compile requests; RUSTC_WRAPPER is probably not reaching cargo."
++          fi
++
++      - name: Save cargo home cache
++        if: always() && !cancelled() && steps.cargo_home_restore.outputs.cache-hit != 'true'
++        continue-on-error: true
++        uses: actions/cache/save@v4
++        with:
++          path: |
++            ~/.cargo/registry/index/
++            ~/.cargo/registry/cache/
++            ~/.cargo/git/db/
++          key: cargo-home-windows-x64-${{ steps.cachekey.outputs.hash }}
++
++      - name: Save sccache cache
++        if: always() && !cancelled()
++        continue-on-error: true
++        uses: actions/cache/save@v4
++        with:
++          path: ${{ env.SCCACHE_DIR }}
++          key: sccache-windows-x64-${{ steps.cachekey.outputs.hash }}-${{ github.run_id }}
++
++      - name: Stage zip
++        shell: pwsh
++        run: |
++          $ErrorActionPreference = "Stop"
++          $artifactName = "${{ inputs.artifact_name }}"
++          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "codex-rs\target\x86_64-pc-windows-msvc\release"
++          $stageRoot = Join-Path $env:RUNNER_TEMP $artifactName
++          $stageDir = Join-Path $stageRoot $artifactName
++          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
++
++          Copy-Item (Join-Path $releaseDir "codex.exe") $stageDir
++          Copy-Item (Join-Path $releaseDir "codex-command-runner.exe") $stageDir
++          Copy-Item (Join-Path $releaseDir "codex-windows-sandbox-setup.exe") $stageDir
++          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "README.md") $stageDir
++          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "RELEASE.md") $stageDir
++
++          $zipPath = Join-Path $env:GITHUB_WORKSPACE "$artifactName.zip"
++          if (Test-Path $zipPath) {
++            Remove-Item $zipPath -Force
++          }
++          Compress-Archive -Path $stageDir -DestinationPath $zipPath -CompressionLevel Optimal
++          "ZIP_PATH=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Append
++
++      - name: Upload artifact
++        uses: actions/upload-artifact@v4
++        with:
++          name: ${{ inputs.artifact_name }}
++          path: ${{ env.ZIP_PATH }}
++          if-no-files-found: error
++
++      - name: Upload release asset
++        if: ${{ inputs.release_tag != '' }}
++        uses: softprops/action-gh-release@v2
++        with:
++          tag_name: ${{ inputs.release_tag }}
++          name: ${{ inputs.release_tag }}
++          prerelease: true
++          files: ${{ env.ZIP_PATH }}
+diff --git a/.github/workflows/niu-patch-guard.yml b/.github/workflows/niu-patch-guard.yml
+new file mode 100644
+index 0000000000..b679ff9b96
+--- /dev/null
++++ b/.github/workflows/niu-patch-guard.yml
+@@ -0,0 +1,80 @@
++name: niu-patch-guard
++
++# Keeps the fork's delta provably applied to a current upstream openai/codex.
++#
++# Why this is a hard gate rather than a warning: part of the delta lives in
++# codex-rs/shell-command/src/command_safety/ (is_safe_command.rs,
++# is_dangerous_command.rs) and parse_command.rs. Upstream keeps adding
++# dangerous-command rules, so a fork that silently stops applying to upstream
++# main is not just inconvenient - it can allow on the niu path what upstream
++# already blocks, or block what upstream now allows.
++#
++# The job does not build the release binary (that takes hours); it proves the
++# patch series still applies and that the touched crate still compiles.
++
++on:
++  schedule:
++    - cron: "17 4 * * *"
++  workflow_dispatch:
++  pull_request:
++    paths:
++      - "codex-rs/shell-command/**"
++      - "codex-rs/windows-sandbox-rs/**"
++      - "codex-rs/core/src/tools/**"
++      - "codex-rs/sandboxing/**"
++      - "scripts/niu/**"
++
++permissions:
++  contents: read
++
++jobs:
++  guard:
++    name: Upstream patch guard
++    runs-on: ubuntu-latest
++    timeout-minutes: 45
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          # Full history: the guard needs the merge base with upstream.
++          fetch-depth: 0
++
++      - name: Add upstream and fetch main
++        run: |
++          set -euo pipefail
++          git remote add upstream https://github.com/openai/codex.git
++          # Fetch the branch only. `--tags` pulls hundreds of tags and times out.
++          git fetch --no-tags upstream main
++
++      - name: Report drift
++        run: scripts/niu/sync-upstream.sh drift || true
++
++      - name: Export the fork delta as patches
++        run: scripts/niu/sync-upstream.sh export
++
++      - name: Apply the patches to a pristine upstream checkout
++        run: scripts/niu/sync-upstream.sh check
++
++      - name: Record the upstream pin
++        run: scripts/niu/sync-upstream.sh pin
++
++      - uses: dtolnay/rust-toolchain@stable
++
++      - uses: actions/cache@v4
++        with:
++          path: |
++            ~/.cargo/registry
++            ~/.cargo/git
++            codex-rs/target
++          key: niu-guard-${{ hashFiles('codex-rs/Cargo.lock') }}
++          restore-keys: niu-guard-
++
++      - name: Compile the crates the delta touches
++        working-directory: codex-rs
++        run: cargo check -p codex-shell-command -p codex-sandboxing
++
++      - name: Upload the exported patch series
++        uses: actions/upload-artifact@v4
++        with:
++          name: niu-patches
++          path: patches/niu/
++          if-no-files-found: error
+diff --git a/README.md b/README.md
+index 06b02fced7..283f3c0128 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,23 @@
++## Codex CLI + NiuBash
++
++This branch makes NiuBash a first-class Windows shell for Codex CLI.
++
++- Detects `niu` and `niu.exe` as a stable shell type.
++- Prefers NiuBash on Windows when it is installed, then falls back to
++  PowerShell and `cmd.exe`.
++- Runs NiuBash commands with `niu -C <script>` for profile-aware sessions
++  and `niu -c <script>` for plain non-login execution.
++- Reuses the existing bash-like parsing, safety checks, approval
++  canonicalization, and `apply_patch` interception paths.
++
++Install NiuBash from the
++[NiuBash releases page](https://github.com/caomengxuan666/dsh-niu/releases), make sure
++`niu.exe` is on `PATH`, then run Codex normally on Windows. See
++[`RELEASE.md`](RELEASE.md) for the manual release notes and asset checklist for
++this fork.
++
++---
++
+ <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
+ <p align="center">
+   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
+diff --git a/RELEASE.md b/RELEASE.md
+new file mode 100644
+index 0000000000..43195375ce
+--- /dev/null
++++ b/RELEASE.md
+@@ -0,0 +1,163 @@
++# NiuBash Codex Release
++
++This file is the manual release checklist for the `niu-first-class-shell`
++branch. It intentionally does not add GitHub Actions or local build automation;
++use existing release assets from the NiuBash project when publishing this fork.
++
++## Scope
++
++- Codex detects `niu` and `niu.exe` as `ShellType::Niu`.
++- Windows default shell selection prefers NiuBash when available.
++- NiuBash command execution uses `niu -C` for profile-aware shell sessions
++  and `niu -c` for plain shell sessions.
++- Bash-like command parsing, safe-command checks, dangerous-command checks,
++  approval prefix handling, and `apply_patch` interception include NiuBash.
++- Shell snapshots stay disabled for NiuBash until replay behavior is explicitly
++  supported.
++
++## Local build prerequisites
++
++Building this fork locally on Windows hits three separate walls, all of them
++environmental:
++
++1. The `v8` crate's build script creates a directory symlink under
++   `codex-rs/target/release/gn_root`. Windows grants that only with **Developer
++   Mode** enabled or from an **elevated** shell; otherwise the build fails with
++   `symlink_dir failed ... 客户端没有所需的特权 (os error 1314)`.
++2. Without pre-generated bindings it also runs a binding generator that needs
++   **libclang** on `LIBCLANG_PATH`.
++3. Building v8 from source is slow, and fetching large artifacts from GitHub is
++   slow on a proxied network.
++
++Upstream avoids 1 and 2 by shipping prebuilt v8 libraries and pre-generated
++bindings, wired up by the in-repo action `.github/actions/setup-rusty-v8`, which
++exports `RUSTY_V8_ARCHIVE` and `RUSTY_V8_SRC_BINDING_PATH`. The release workflow
++runs it; a local run can copy those exports (download the artifacts for
++`rusty-v8-v$(python .github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)`
++and set both variables) and skip the symlink and libclang requirements entirely.
++
++**Practical answer: build in the workflow, not locally.** Local is still fine for
++packaging and verification (`scripts/niu/verify-npm-package.sh`), which is
++exercised against prebuilt binaries.
++
++## Manual Asset Checklist
++
++- Build the Windows x64 zip either locally or with the
++  `niu-codex-windows-build` workflow (manual dispatch).
++- Name the release and tag `niu-codex-preview-<YYYYMMDD>` and the asset
++  `niu-codex-preview-<YYYYMMDD>-windows-x86_64.zip`.
++- The zip is the canonical package directory, which
++  `scripts/build_codex_package.py` produces and validates
++  (`scripts/codex_package/layout.py` refuses to validate a package that is
++  missing any of these):
++
++  ```text
++  codex-package.json
++  bin/codex.exe
++  bin/codex-code-mode-host.exe
++  codex-resources/codex-command-runner.exe
++  codex-resources/codex-windows-sandbox-setup.exe
++  codex-path/rg.exe
++  ```
++
++  An earlier revision of this checklist listed only three executables in a flat
++  directory. That layout is incomplete: `codex-code-mode-host.exe` and
++  `codex-path/rg.exe` are required, and the sandbox helpers are looked up under
++  `codex-resources/`, not beside the entrypoint.
++- Include this repository commit SHA in the release description.
++- Smoke test on Windows with:
++
++```shell
++niu -c 'printf "niu ok\n"'
++codex --version
++```
++
++## Version
++
++`codex-rs/Cargo.toml` `[workspace.package].version` is the single source. 139
++crates inherit it, `scripts/codex_package/version.py` writes it into
++`codex-package.json`, and it is compiled into the binary, so `codex --version`
++only agrees with the npm metadata when the binaries and the version bump come
++from the same revision.
++
++Upstream keeps `0.0.0` in-tree as a dev sentinel (`windows-sandbox-rs` uses it
++to pick a mtime-based helper suffix instead of the release version). Bump it in
++the release commit; the npm workflow refuses to run while it is still `0.0.0`.
++
++Upstream's own release workflow accepts only `X.Y.Z` (published without a tag,
++i.e. `latest`) or `X.Y.Z-alpha.N` (published under `alpha`), and fails the build
++when the git tag disagrees with `Cargo.toml`. Arbitrary prerelease suffixes such
++as `X.Y.Z-niu.1` would not pass that check, and semver ranges skip prereleases,
++so fork identity belongs in the dist-tag rather than the version.
++
++## npm release (preferred)
++
++The npm path is automated and produces both the zip and the tarballs from one
++build, so the binaries, `codex-package.json`, and the npm version cannot drift
++apart:
++
++1. Bump `codex-rs/Cargo.toml` and commit.
++2. Run the `niu-codex-npm-release` workflow with `publish=false` and check the
++   artifacts. It builds the three binary sets, assembles the canonical package
++   directory, produces the zip, stages the two npm packages, and runs
++   `scripts/niu/verify-npm-package.sh`.
++3. Re-run it with `publish=true` (needs the `NPM_TOKEN` secret) to publish.
++
++Publish order is enforced by the workflow and matters: the meta package
++`@cmx666/codex` ships only `bin/codex.js`, and its binaries arrive through
++`optionalDependencies` as `npm:@cmx666/codex@<version>-win32-x64`, which npm
++installs under `node_modules/@cmx666/codex-win32-x64/`. Publishing the meta
++package first installs into a "missing optional dependency" error for everyone
++until the platform package lands.
++
++By hand, the same steps are:
++
++```shell
++python scripts/build_codex_package.py --target x86_64-pc-windows-msvc \
++  --variant codex --cargo-profile release \
++  --package-dir "$VENDOR/win32-x64" --force
++python codex-cli/scripts/build_npm_package.py --package codex-win32-x64 \
++  --vendor-src "$VENDOR" --release-version "$VERSION" --staging-dir "$STAGE/platform"
++python codex-cli/scripts/build_npm_package.py --package codex \
++  --release-version "$VERSION" --staging-dir "$STAGE/meta"
++(cd "$STAGE/platform" && npm publish *.tgz --tag win32-x64 --access public)
++(cd "$STAGE/meta" && npm publish *.tgz --tag latest --access public)
++```
++
++`--rg-bin` may be passed to the package builder to reuse a local ripgrep;
++without it the builder fetches its pinned one.
++
++The platform tarball is large (about 300 MB unpacked, 110 MB compressed) because
++`codex.exe` embeds the code-mode runtime. Upstream's equivalent is larger still
++(465 MB unpacked).
++
++## Suggested Release Body
++
++```markdown
++## Codex CLI with first-class NiuBash support
++
++This fork updates Codex on Windows to treat NiuBash as a native shell target
++instead of routing command execution through PowerShell by default.
++
++### Changes
++
++- Detect `niu` and `niu.exe` as a stable shell type.
++- Prefer NiuBash on Windows when it is installed.
++- Execute NiuBash commands with `niu -C` or `niu -c` depending on shell
++  profile requirements.
++- Apply bash-like parsing, command safety checks, approval handling, and
++  `apply_patch` interception to NiuBash commands.
++
++### Assets
++
++- `niu-codex-preview-<YYYYMMDD>-windows-x86_64.zip` — Codex CLI plus the
++  Windows sandbox helpers (`codex-command-runner.exe`,
++  `codex-windows-sandbox-setup.exe`), built from this branch.
++- The NiuBash shell runtime itself is installed separately from the
++  [NiuBash releases page](https://github.com/caomengxuan666/dsh-niu/releases).
++
++### Notes
++
++Install NiuBash first, ensure `niu.exe` is available on `PATH`, then run
++Codex normally on Windows.
++```
+diff --git a/codex-cli/bin/codex.js b/codex-cli/bin/codex.js
+index 934600714b..eef93b6014 100755
+--- a/codex-cli/bin/codex.js
++++ b/codex-cli/bin/codex.js
+@@ -14,12 +14,12 @@ const require = createRequire(import.meta.url);
+ const codexPackageRoot = realpathSync(path.join(__dirname, ".."));
+ 
+ const PLATFORM_PACKAGE_BY_TARGET = {
+-  "x86_64-unknown-linux-musl": "@openai/codex-linux-x64",
+-  "aarch64-unknown-linux-musl": "@openai/codex-linux-arm64",
+-  "x86_64-apple-darwin": "@openai/codex-darwin-x64",
+-  "aarch64-apple-darwin": "@openai/codex-darwin-arm64",
+-  "x86_64-pc-windows-msvc": "@openai/codex-win32-x64",
+-  "aarch64-pc-windows-msvc": "@openai/codex-win32-arm64",
++  "x86_64-unknown-linux-musl": "@cmx666/codex-linux-x64",
++  "aarch64-unknown-linux-musl": "@cmx666/codex-linux-arm64",
++  "x86_64-apple-darwin": "@cmx666/codex-darwin-x64",
++  "aarch64-apple-darwin": "@cmx666/codex-darwin-arm64",
++  "x86_64-pc-windows-msvc": "@cmx666/codex-win32-x64",
++  "aarch64-pc-windows-msvc": "@cmx666/codex-win32-arm64",
+ };
+ 
+ const { platform, arch } = process;
+@@ -98,12 +98,12 @@ function findCodexExecutable() {
+   const packageManager = detectPackageManager();
+   const updateCommand =
+     packageManager === "bun"
+-      ? "bun install -g @openai/codex@latest"
++      ? "bun install -g @cmx666/codex@latest"
+       : packageManager === "pnpm"
+-        ? "pnpm add -g @openai/codex@latest"
++        ? "pnpm add -g @cmx666/codex@latest"
+         : packageManager === "vite-plus"
+-          ? "vp install -g @openai/codex@latest"
+-          : "npm install -g @openai/codex@latest";
++          ? "vp install -g @cmx666/codex@latest"
++          : "npm install -g @cmx666/codex@latest";
+   throw new Error(
+     `Missing optional dependency ${platformPackage}. Reinstall Codex: ${updateCommand}`,
+   );
+@@ -124,7 +124,7 @@ function isPnpmOwnedCodexInstall(nodeModulesDir) {
+ 
+   try {
+     return (
+-      realpathSync(path.join(nodeModulesDir, "@openai", "codex")) ===
++      realpathSync(path.join(nodeModulesDir, "@cmx666", "codex")) ===
+       codexPackageRoot
+     );
+   } catch {
+@@ -139,24 +139,24 @@ function isVitePlusOwnedCodexInstall(packagesDir) {
+ 
+   try {
+     const metadata = JSON.parse(
+-      readFileSync(path.join(packagesDir, "@openai", "codex.json"), "utf8"),
++      readFileSync(path.join(packagesDir, "@cmx666", "codex.json"), "utf8"),
+     );
+-    if (metadata.name !== "@openai/codex") {
++    if (metadata.name !== "@cmx666/codex") {
+       return false;
+     }
+ 
+-    // Vite+ records the active global installation in packages/@openai/codex.json.
++    // Vite+ records the active global installation in packages/@cmx666/codex.json.
+     // Older installs have no ID or append a #-prefixed ID to the package name;
+     // newer installs put the ID in a subdirectory of the package prefix.
+     const installId = metadata.installId || "";
+     const installDir = installId.startsWith("#")
+-      ? path.join(packagesDir, `@openai/codex${installId}`)
+-      : path.join(packagesDir, "@openai/codex", installId);
++      ? path.join(packagesDir, `@cmx666/codex${installId}`)
++      : path.join(packagesDir, "@cmx666/codex", installId);
+     for (const nodeModulesDir of [
+       path.join(installDir, "lib", "node_modules"),
+       path.join(installDir, "node_modules"),
+     ]) {
+-      const packageRoot = path.join(nodeModulesDir, "@openai", "codex");
++      const packageRoot = path.join(nodeModulesDir, "@cmx666", "codex");
+       if (
+         existsSync(packageRoot) &&
+         realpathSync(packageRoot) === codexPackageRoot
+diff --git a/codex-cli/package.json b/codex-cli/package.json
+index 7d3a49405d..8201688b51 100644
+--- a/codex-cli/package.json
++++ b/codex-cli/package.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "@openai/codex",
++  "name": "@cmx666/codex",
+   "version": "0.0.0-dev",
+   "description": "Codex CLI is a coding agent from OpenAI that runs locally on your computer.",
+   "license": "Apache-2.0",
+@@ -15,7 +15,7 @@
+   ],
+   "repository": {
+     "type": "git",
+-    "url": "git+https://github.com/openai/codex.git",
++    "url": "git+https://github.com/caomengxuan666/codex.git",
+     "directory": "codex-cli"
+   },
+   "packageManager": "pnpm@10.34.5+sha512.a4ee05f2f73658255bd6a89859c065a45c28a57daefae2c893a168ee2b73168c37b91e83e57ea67654ad03f03031746430e8bce38e362e042605fb8abc80192e"
+diff --git a/codex-cli/scripts/README.md b/codex-cli/scripts/README.md
+index 4877781c36..16cf9c1519 100644
+--- a/codex-cli/scripts/README.md
++++ b/codex-cli/scripts/README.md
+@@ -15,7 +15,7 @@ This downloads the required native package archive artifacts, hydrates `vendor/`
+ each package, and writes tarballs to `dist/npm/`.
+ 
+ When `--package codex` is provided, the staging helper builds the lightweight
+-`@openai/codex` meta package plus all platform-native `@openai/codex` variants
++`@cmx666/codex` meta package plus all platform-native `@cmx666/codex` variants
+ that are later published under platform-specific dist-tags.
+ 
+ Direct `build_npm_package.py` invocations are still useful for package-specific
+diff --git a/codex-cli/scripts/build_npm_package.py b/codex-cli/scripts/build_npm_package.py
+index 12f4f9dc89..a1c17c6a42 100755
+--- a/codex-cli/scripts/build_npm_package.py
++++ b/codex-cli/scripts/build_npm_package.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Stage and optionally package the @openai/codex npm module."""
++"""Stage and optionally package the @cmx666/codex npm module."""
+ 
+ import argparse
+ import json
+@@ -15,49 +15,49 @@ CODEX_CLI_ROOT = SCRIPT_DIR.parent
+ REPO_ROOT = CODEX_CLI_ROOT.parent
+ RESPONSES_API_PROXY_NPM_ROOT = REPO_ROOT / "codex-rs" / "responses-api-proxy" / "npm"
+ CODEX_SDK_ROOT = REPO_ROOT / "sdk" / "typescript"
+-CODEX_NPM_NAME = "@openai/codex"
++CODEX_NPM_NAME = "@cmx666/codex"
+ CODEX_PACKAGE_COMPONENT = "codex-package"
+ 
+ # `npm_name` is the local optional-dependency alias consumed by `bin/codex.js`.
+-# The underlying package published to npm is always `@openai/codex`.
++# The underlying package published to npm is always `@cmx666/codex`.
+ CODEX_PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
+     "codex-linux-x64": {
+-        "npm_name": "@openai/codex-linux-x64",
++        "npm_name": "@cmx666/codex-linux-x64",
+         "npm_tag": "linux-x64",
+         "target_triple": "x86_64-unknown-linux-musl",
+         "os": "linux",
+         "cpu": "x64",
+     },
+     "codex-linux-arm64": {
+-        "npm_name": "@openai/codex-linux-arm64",
++        "npm_name": "@cmx666/codex-linux-arm64",
+         "npm_tag": "linux-arm64",
+         "target_triple": "aarch64-unknown-linux-musl",
+         "os": "linux",
+         "cpu": "arm64",
+     },
+     "codex-darwin-x64": {
+-        "npm_name": "@openai/codex-darwin-x64",
++        "npm_name": "@cmx666/codex-darwin-x64",
+         "npm_tag": "darwin-x64",
+         "target_triple": "x86_64-apple-darwin",
+         "os": "darwin",
+         "cpu": "x64",
+     },
+     "codex-darwin-arm64": {
+-        "npm_name": "@openai/codex-darwin-arm64",
++        "npm_name": "@cmx666/codex-darwin-arm64",
+         "npm_tag": "darwin-arm64",
+         "target_triple": "aarch64-apple-darwin",
+         "os": "darwin",
+         "cpu": "arm64",
+     },
+     "codex-win32-x64": {
+-        "npm_name": "@openai/codex-win32-x64",
++        "npm_name": "@cmx666/codex-win32-x64",
+         "npm_tag": "win32-x64",
+         "target_triple": "x86_64-pc-windows-msvc",
+         "os": "win32",
+         "cpu": "x64",
+     },
+     "codex-win32-arm64": {
+-        "npm_name": "@openai/codex-win32-arm64",
++        "npm_name": "@cmx666/codex-win32-arm64",
+         "npm_tag": "win32-arm64",
+         "target_triple": "aarch64-pc-windows-msvc",
+         "os": "win32",
+diff --git a/scripts/niu/sync-upstream.sh b/scripts/niu/sync-upstream.sh
+new file mode 100644
+index 0000000000..afc4a22473
+--- /dev/null
++++ b/scripts/niu/sync-upstream.sh
+@@ -0,0 +1,188 @@
++#!/usr/bin/env bash
++# Keep this fork in step with upstream openai/codex.
++#
++# The fork's delta is deliberately small (a shell type, its detection, parsing
++# and safety rules, and the sandbox plumbing). The job of this script is to make
++# that delta visible, reproducible, and provably applied to a current upstream.
++#
++# Subcommands:
++#   pin      record the upstream commit this fork is currently based on
++#   drift    show how far behind upstream main is, and what changed upstream
++#   rebase   fetch upstream and replay the fork's commits on top of it
++#   export   write the delta to patches/niu/ as a mail-formatted series
++#   check    apply the exported patches to a pristine upstream checkout
++#            (git apply -3) and report conflicts without touching this tree
++#
++# Typical loop after an upstream release:
++#   scripts/niu/sync-upstream.sh drift
++#   scripts/niu/sync-upstream.sh rebase
++#   scripts/niu/sync-upstream.sh export
++#   scripts/niu/sync-upstream.sh check
++#   scripts/niu/sync-upstream.sh pin
++#
++# HTTP proxy: on networks where GitHub needs one, configure it once per clone,
++# otherwise every fetch here fails with "remote helper 'https' aborted session":
++#   git config http.proxy http://127.0.0.1:65532
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
++cd "$REPO_ROOT"
++
++UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
++UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
++PATCH_DIR="patches/niu"
++PIN_FILE="patches/UPSTREAM"
++BRANCH="$(git rev-parse --abbrev-ref HEAD)"
++
++die() { printf 'error: %s\n' "$*" >&2; exit 1; }
++
++require_upstream() {
++  git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1 \
++    || die "no '$UPSTREAM_REMOTE' remote; add it with: git remote add upstream https://github.com/openai/codex.git"
++}
++
++# Files where the fork changes behaviour upstream also changes. Conflicts here
++# are expected, and a stale patch here is a safety problem rather than a
++# cosmetic one: upstream keeps adding dangerous-command rules.
++HOT_FILES=(
++  codex-rs/shell-command/src/shell_detect.rs
++  codex-rs/shell-command/src/bash.rs
++  codex-rs/shell-command/src/parse_command.rs
++  codex-rs/shell-command/src/command_safety/is_safe_command.rs
++  codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
++)
++
++cmd_fetch() {
++  require_upstream
++  echo "fetching $UPSTREAM_REMOTE/$UPSTREAM_BRANCH (no tags)"
++  echo "note: the first fetch of this repository is large (hundreds of MB)."
++  echo "      fetch again later and it is incremental."
++  git fetch --no-tags "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
++  echo "now at $(git rev-parse --short "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH")"
++}
++
++cmd_drift() {
++  require_upstream
++  # No fetch here on purpose: fetching this repository is a large operation, so
++  # `fetch` is its own step. Compare against whatever upstream ref exists and
++  # say how old it is.
++  local when
++  when="$(git show -s --format=%cI "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH" 2>/dev/null || echo unknown)"
++  echo "upstream $UPSTREAM_REMOTE/$UPSTREAM_BRANCH : $(git rev-parse --short "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH")  (fetched object date: $when)"
++  echo "branch   $BRANCH : $(git rev-parse --short HEAD)"
++  echo "run 'scripts/niu/sync-upstream.sh fetch' first if that looks stale."
++  echo
++  echo "behind / ahead (upstream...HEAD):"
++  git rev-list --left-right --count "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH...HEAD" | \
++    while read -r behind ahead; do echo "  behind $behind, ahead $ahead"; done
++  echo
++  echo "commits upstream gained since the merge base:"
++  # -n instead of `| head`: pipefail would abort the script on SIGPIPE.
++  git log --oneline -n 15 "$(git merge-base HEAD "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH")..$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
++  echo
++  echo "upstream commits touching this fork's hot files:"
++  git log --oneline -n 15 "$(git merge-base HEAD "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH")..$UPSTREAM_REMOTE/$UPSTREAM_BRANCH" -- "${HOT_FILES[@]}"
++  echo
++  echo "this fork's delta:"
++  git diff --stat "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH...HEAD" | tail -3
++}
++
++cmd_rebase() {
++  require_upstream
++  echo "fetching $UPSTREAM_REMOTE/$UPSTREAM_BRANCH (no tags; large on the first run)"
++  git fetch --no-tags "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
++  echo "replaying $(git rev-list --count "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH..HEAD") commit(s) onto $UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
++  git rebase "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
++  echo "done. resolve conflicts file by file, then: scripts/niu/sync-upstream.sh export"
++}
++
++cmd_export() {
++  mkdir -p "$PATCH_DIR"
++  rm -f "$PATCH_DIR"/*.patch
++  git format-patch --no-signature --zero-commit \
++    --output-directory "$PATCH_DIR" "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH..HEAD" >/dev/null
++  echo "wrote $(ls "$PATCH_DIR"/*.patch | wc -l) patch(es) to $PATCH_DIR"
++  ls -1 "$PATCH_DIR"
++}
++
++cmd_check() {
++  [ -d "$PATCH_DIR" ] || die "$PATCH_DIR does not exist; run export first"
++  local work
++  work="$(mktemp -d)"
++  echo "pristine upstream checkout in $work"
++  git worktree add --quiet --detach "$work/upstream" "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
++  local status=0
++  (
++    cd "$work/upstream"
++    if git apply --check "$REPO_ROOT/$PATCH_DIR"/*.patch 2>"$work/apply.log"; then
++      echo "patches apply exactly to $UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
++    elif git apply -3 "$REPO_ROOT/$PATCH_DIR"/*.patch 2>>"$work/apply.log"; then
++      echo "patches needed a three-way merge against $UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
++      echo "(same result a rebase would produce; review the diff below)"
++    else
++      echo "PATCH CONFLICT against $UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
++      status=1
++      # --3way left the tree untouched (apply is atomic). Re-run with --reject so
++      # the hunks that do fit land and the failures are enumerated per file.
++      # --reject cannot be combined with --3way, so this is context-only.
++      git apply --reject "$REPO_ROOT/$PATCH_DIR"/*.patch >>"$work/apply.log" 2>&1 || true
++      local rejected
++      rejected="$(find . -name '*.rej' -not -path './.git/*' | sed 's|^\./||' | sort)"
++      if [ -n "$rejected" ]; then
++        echo
++        echo "hunks that no longer apply (each needs a manual rebase):"
++        printf '  %s\n' $rejected
++      fi
++    fi
++    # Files the patch touches that upstream moved or removed. These need the
++    # patch re-targeted, not a merge conflict resolved.
++    if grep -E 'No such file or directory|does not exist in index' "$work/apply.log" >/dev/null 2>&1; then
++      echo
++      echo "targets that no longer exist upstream:"
++      grep -E 'No such file or directory|does not exist in index' "$work/apply.log" | sed 's/^/  /'
++    fi
++    local conflicted
++    conflicted="$(git ls-files -u | cut -f2 | sort -u)"
++    if [ -n "$conflicted" ]; then
++      echo
++      echo "conflicted files (a rebase would stop on these):"
++      printf '  %s\n' $conflicted
++    fi
++    echo
++    echo "fork delta as far as it applied:"
++    git diff --stat | tail -5
++    exit $status
++  ) || status=$?
++  git worktree remove --force "$work/upstream" 2>/dev/null || true
++  rm -rf "$work"
++  return $status
++}
++
++cmd_pin() {
++  require_upstream
++  mkdir -p "$(dirname "$PIN_FILE")"
++  local base
++  base="$(git merge-base HEAD "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH")"
++  {
++    echo "# Upstream commit this fork is based on."
++    echo "# Refreshed by scripts/niu/sync-upstream.sh pin after every rebase."
++    echo "repo=https://github.com/openai/codex"
++    echo "branch=$UPSTREAM_BRANCH"
++    echo "commit=$base"
++    echo "commit_date=$(git show -s --format=%cI "$base")"
++    echo "fork_commits=$(git rev-list --count "$base..HEAD")"
++  } > "$PIN_FILE"
++  cat "$PIN_FILE"
++}
++
++case "${1:-}" in
++  pin)    cmd_pin ;;
++  fetch)  cmd_fetch ;;
++  drift)  cmd_drift ;;
++  rebase) cmd_rebase ;;
++  export) cmd_export ;;
++  check)  cmd_check ;;
++  *) sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
++esac
+diff --git a/scripts/niu/verify-npm-package.sh b/scripts/niu/verify-npm-package.sh
+new file mode 100644
+index 0000000000..361c5f5f16
+--- /dev/null
++++ b/scripts/niu/verify-npm-package.sh
+@@ -0,0 +1,162 @@
++#!/usr/bin/env bash
++# Stage, pack, and install-test the @cmx666/codex npm packages.
++#
++# Verifies the thing that actually breaks in practice: a tarball that installs
++# but is missing a binary, a resource, or the launcher's vendor tree.
++#
++# Usage:
++#   scripts/niu/verify-npm-package.sh <version> [vendor-root] [work-dir]
++#
++#   version     npm release version, e.g. 0.163.0-alpha.1
++#   vendor-root directory whose child is the target triple, containing the
++#               canonical package layout (bin/, codex-resources/, codex-path/,
++#               codex-package.json). Build it with:
++#                 python scripts/build_codex_package.py --target x86_64-pc-windows-msvc \
++#                   --variant codex --cargo-profile release \
++#                   --package-dir <vendor-root>/x86_64-pc-windows-msvc --force
++#   work-dir    scratch directory (default: a temp dir)
++#
++# Windows note: the meta package only ships bin/codex.js, so the launcher finds
++# binaries through optionalDependencies or, absent that, its vendored sibling
++# tree. Staging with --vendor-src gives it that tree, which is what makes the
++# local install test meaningful before anything is published.
++
++set -euo pipefail
++
++VERSION="${1:?usage: verify-npm-package.sh <version> [vendor-root] [work-dir]}"
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
++VENDOR_ROOT="${2:-$(mktemp -d)/vendor}"
++WORK_DIR="${3:-$(mktemp -d)}"
++TRIPLE="x86_64-pc-windows-msvc"
++PLATFORM_TAG="win32-x64"
++
++step() { printf '\n=== %s\n' "$1"; }
++
++step "inputs"
++echo "repo        : $REPO_ROOT"
++echo "version     : $VERSION"
++echo "vendor root : $VENDOR_ROOT"
++echo "work dir    : $WORK_DIR"
++echo "platform    : $TRIPLE ($PLATFORM_TAG)"
++
++step "1/6 canonical package layout is complete"
++PKG="$VENDOR_ROOT/$TRIPLE"
++REQUIRED="
++bin/codex.exe
++bin/codex-code-mode-host.exe
++codex-resources/codex-command-runner.exe
++codex-resources/codex-windows-sandbox-setup.exe
++codex-path/rg.exe
++codex-package.json
++"
++missing=0
++for rel in $REQUIRED; do
++  if [ -f "$PKG/$rel" ]; then
++    printf '  ok      %-46s %s bytes\n' "$rel" "$(stat -c '%s' "$PKG/$rel")"
++  else
++    printf '  MISSING %s\n' "$rel"
++    missing=1
++  fi
++done
++[ "$missing" -eq 0 ] || { echo "layout incomplete; refusing to stage"; exit 1; }
++echo "  codex-package.json:"
++cat "$PKG/codex-package.json"
++
++step "2/6 stage the meta package (bin/codex.js + vendor tree)"
++STAGE_META="$WORK_DIR/meta"
++rm -rf "$STAGE_META"; mkdir -p "$STAGE_META"
++python "$REPO_ROOT/codex-cli/scripts/build_npm_package.py" \
++  --package codex \
++  --vendor-src "$VENDOR_ROOT" \
++  --release-version "$VERSION" \
++  --staging-dir "$STAGE_META"
++
++step "3/6 stage the platform package"
++STAGE_PLATFORM="$WORK_DIR/platform"
++rm -rf "$STAGE_PLATFORM"; mkdir -p "$STAGE_PLATFORM"
++python "$REPO_ROOT/codex-cli/scripts/build_npm_package.py" \
++  --package "codex-$PLATFORM_TAG" \
++  --vendor-src "$VENDOR_ROOT" \
++  --release-version "$VERSION" \
++  --staging-dir "$STAGE_PLATFORM"
++
++step "4/6 pack both packages and report what npm will ship"
++(cd "$STAGE_META" && npm pack --json >/dev/null && cp ./*.tgz "$WORK_DIR/")
++(cd "$STAGE_PLATFORM" && npm pack --json >/dev/null && cp ./*.tgz "$WORK_DIR/")
++python - "$WORK_DIR" <<'PY'
++import glob, os, sys, tarfile
++work = sys.argv[1]
++for tgz in sorted(glob.glob(os.path.join(work, "*.tgz"))):
++    with tarfile.open(tgz) as tf:
++        members = [m for m in tf.getmembers() if m.isfile()]
++        total = sum(m.size for m in members)
++    print(f"  {os.path.basename(tgz)}: {len(members)} files, {total/1_000_000:.1f} MB unpacked, "
++          f"{os.path.getsize(tgz)/1_000_000:.1f} MB on the wire")
++    for m in members[:8]:
++        print(f"      {m.name}  {m.size}")
++    if len(members) > 8:
++        print(f"      ... {len(members)-8} more")
++PY
++
++step "5/6 install the meta package and simulate the npm alias optional dependency"
++# The meta package ships only bin/codex.js: its binaries arrive through
++# optionalDependencies as `npm:@cmx666/codex@<version>-win32-x64`, which npm
++# installs under the alias path node_modules/@cmx666/codex-win32-x64/. Nothing
++# is published yet, so unpack the platform tarball to that exact path. This is
++# the same resolution the launcher performs in a real install.
++PROJ="$WORK_DIR/proj"
++rm -rf "$PROJ"; mkdir -p "$PROJ"
++(cd "$PROJ" && npm init -y >/dev/null 2>&1)
++META_TGZ="$(ls "$WORK_DIR"/cmx666-codex-*.tgz | grep -v "$PLATFORM_TAG" | head -1)"
++PLATFORM_TGZ="$(ls "$WORK_DIR"/cmx666-codex-*-"$PLATFORM_TAG".tgz | head -1)"
++[ -n "$META_TGZ" ] && [ -n "$PLATFORM_TGZ" ] || { echo "missing a tarball"; exit 1; }
++(cd "$PROJ" && npm install --omit=optional --no-audit --no-fund "$META_TGZ")
++ALIAS_DIR="$PROJ/node_modules/@cmx666/codex-$PLATFORM_TAG"
++# Unpack with Python's tarfile, not tar. On Windows the runner's temp dir is a
++# native `D:\a\_temp` path, and tar reads the drive colon as a remote host
++# ("Cannot connect to D:"). --force-local and cygpath normalization both still
++# trip over the mixed separators Git Bash produces from `$RUNNER_TEMP/...`.
++# tarfile takes the path natively and is already a dependency of this script.
++rm -rf "$ALIAS_DIR"
++python - "$PLATFORM_TGZ" "$ALIAS_DIR" <<'PY'
++import os
++import shutil
++import sys
++import tarfile
++
++tgz, dest = sys.argv[1], sys.argv[2]
++os.makedirs(dest, exist_ok=True)
++with tarfile.open(tgz) as archive:
++    for member in archive.getmembers():
++        # npm tarballs are rooted at `package/`; the tar call this replaces
++        # used --strip-components=1 to drop that level.
++        if not member.name.startswith("package/"):
++            continue
++        relative = member.name[len("package/"):]
++        if not relative:
++            continue
++        target = os.path.join(dest, *relative.split("/"))
++        if member.isdir():
++            os.makedirs(target, exist_ok=True)
++        elif member.isfile():
++            os.makedirs(os.path.dirname(target), exist_ok=True)
++            with archive.extractfile(member) as source, open(target, "wb") as output:
++                shutil.copyfileobj(source, output)
++        else:
++            print(f"  skipping non-file member: {member.name}")
++PY
++echo "  meta package   : $PROJ/node_modules/@cmx666/codex"
++echo "  platform alias : $ALIAS_DIR ($(find "$ALIAS_DIR" -type f | wc -l) files)"
++echo "  resolved by the launcher:"
++node -e "console.log('    ' + require.resolve('@cmx666/codex-$PLATFORM_TAG/package.json'))" --prefix "$PROJ" 2>/dev/null \
++  || (cd "$PROJ" && node -e "console.log('    ' + require.resolve('@cmx666/codex-$PLATFORM_TAG/package.json'))")
++(cd "$PROJ" && ./node_modules/.bin/codex --version)
++(cd "$PROJ" && ./node_modules/.bin/codex --help 2>&1 | head -3)
++
++step "6/6 publish order reminder"
++printf '  Publish the platform package first, then the meta package:\n'
++printf '    npm publish %s --tag %s\n' "$(basename "$PLATFORM_TGZ")" "$PLATFORM_TAG"
++printf '    npm publish %s --tag latest\n' "$(basename "$META_TGZ")"
++
++printf '\nAll checks passed for %s\n' "$VERSION"

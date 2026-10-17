@@ -1,0 +1,2674 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: caomengxuan666 <2507560089@qq.com>
+Date: Sat, 17 Oct 2026 15:03:59 +0800
+Subject: [PATCH 1/2] feat(niu): re-target the Niu shell delta onto upstream
+ ce0323f2f2
+
+The fork was pinned to upstream 2230d64464 (2026-08-12) and had drifted 3180
+commits. `sync-upstream.sh check` reported PATCH CONFLICT, and for good reason:
+the delta could not be rebased, only re-implemented.
+
+What upstream removed underneath the delta:
+
+- `shell-command/src/command_safety/is_safe_command.rs` is gone, along with the
+  `is_known_safe_command` / `is_safe_to_call_with_exec` allowlist. Shell wrappers
+  such as `bash -lc "..."` are no longer "known safe" by name, so Niu needs no
+  equivalent entry; the fork's `niu -C "git status"` test was dropped.
+- `ToolUserShellType` and `tool_user_shell_type` are gone, so the fork's
+  `Niu` arm and its enum variant were dropped too.
+- `create_shell_command_tool`'s PowerShell description was replaced by
+  `exec_command`, so the fork's description reword had no target. The surviving
+  piece of that intent, the `<shell>niu</shell>` bullet in
+  `windows_shell_guidance()`, is kept.
+- `get_shell()` and the `get_*_shell()` helpers lost their `path` parameter, so
+  `get_niu_shell()` was rewritten to the new signature.
+
+What upstream added that now needs Niu arms: `capture_script`,
+`exports::script`, `shell_startup_script`, and the credential-masking gate in
+`tools/runtimes/unified_exec.rs`. Niu is grouped with `Sh`/`Cmd`/`PowerShell`
+in all of them, matching the fork's existing decision that Niu is not
+snapshot-supported.
+
+`wrap_windows_sandbox_exec_request_for_direct_spawn` needed a real merge.
+Upstream narrowed helper materialization to the Codex helper only, because
+`resolve_exe_for_launch` copies whatever it is given into the helper bin dir.
+The fork's read-roots fix is preserved without re-widening that: the workload's
+own directory and, when a helper is actually materialized, the helper's
+directory are added to `additional_read_roots`.
+
+Every change compiles: `cargo check --all-targets` passes for codex-shell-command,
+codex-core, codex-sandboxing, codex-windows-sandbox, codex-tools, codex-apply-patch,
+codex-exec-server-protocol, codex-app-server-protocol and codex-cli.
+
+Not yet done on this branch: the fork-owned npm/CI/scripts delta, re-exporting
+patches/niu, and refreshing patches/UPSTREAM.
+---
+ codex-rs/Cargo.lock                           | 324 +++++++++---------
+ codex-rs/Cargo.toml                           |   2 +-
+ .../src/protocol/v2/environment.rs            |   2 +-
+ codex-rs/apply-patch/src/invocation.rs        |  11 +
+ codex-rs/cli/src/debug_sandbox.rs             |   1 +
+ .../src/command_canonicalization_tests.rs     |  19 +
+ codex-rs/core/src/exec.rs                     |   1 +
+ codex-rs/core/src/exec_policy.rs              |  10 +
+ codex-rs/core/src/exec_policy_tests.rs        |   7 +
+ codex-rs/core/src/session/tests.rs            |  12 +-
+ codex-rs/core/src/shell.rs                    |  31 ++
+ codex-rs/core/src/shell_snapshot.rs           |  13 +-
+ codex-rs/core/src/shell_snapshot_tests.rs     |  10 +
+ codex-rs/core/src/shell_tests.rs              |  13 +
+ .../core/src/tools/handlers/shell_spec.rs     |   1 +
+ .../core/src/tools/runtimes/unified_exec.rs   |   2 +-
+ codex-rs/docs/niu-first-class-shell-plan.md   |  46 +++
+ codex-rs/exec-server-protocol/src/protocol.rs |   2 +-
+ codex-rs/sandboxing/src/manager.rs            |  25 +-
+ codex-rs/sandboxing/src/manager_tests.rs      |  13 +
+ codex-rs/sandboxing/src/spawn.rs              |   1 +
+ codex-rs/shell-command/src/bash.rs            |  32 +-
+ .../command_safety/is_dangerous_command.rs    |   9 +
+ codex-rs/shell-command/src/parse_command.rs   |  15 +
+ codex-rs/shell-command/src/shell_detect.rs    |  72 +++-
+ .../src/shell_snapshot_capture.rs             |   2 +-
+ .../src/shell_snapshot_exports.rs             |   2 +-
+ codex-rs/shell-command/src/startup.rs         |   2 +-
+ .../windows-sandbox-rs/src/elevated_impl.rs   |   4 +
+ codex-rs/windows-sandbox-rs/src/identity.rs   |   6 +-
+ codex-rs/windows-sandbox-rs/src/spawn_prep.rs |   2 +
+ .../src/unified_exec/backends/elevated.rs     |   6 +
+ .../unified_exec/backends/elevated_tests.rs   |   7 +-
+ .../src/unified_exec/mod.rs                   |   4 +
+ .../src/unified_exec/tests.rs                 |   3 +
+ codex-rs/windows-sandbox-rs/src/wrapper.rs    |  16 +
+ .../windows-sandbox-rs/src/wrapper_tests.rs   |   6 +
+ 37 files changed, 552 insertions(+), 182 deletions(-)
+ create mode 100644 codex-rs/docs/niu-first-class-shell-plan.md
+
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index f95d5963e2..184827d29a 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -287,7 +287,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+ 
+ [[package]]
+ name = "app_test_support"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1909,7 +1909,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-extension"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -1921,7 +1921,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-graph-store"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-state",
+@@ -1936,7 +1936,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-identity"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1956,7 +1956,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-message-board-client"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -1979,7 +1979,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-message-board-extension"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "base64 0.22.1",
+  "caseless",
+@@ -2003,7 +2003,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-roles"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-config",
+  "codex-file-system",
+@@ -2016,7 +2016,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-analytics"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-app-server-protocol",
+  "codex-git-utils",
+@@ -2039,7 +2039,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ansi-escape"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "ansi-to-tui",
+  "pretty_assertions",
+@@ -2050,7 +2050,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-api"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "assert_matches",
+@@ -2088,7 +2088,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2203,7 +2203,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-client"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-app-server",
+  "codex-app-server-protocol",
+@@ -2230,7 +2230,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-daemon"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "blake3",
+@@ -2258,7 +2258,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-protocol"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol-noop-macros",
+@@ -2292,11 +2292,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-protocol-noop-macros"
+-version = "0.0.0"
++version = "0.1.0"
+ 
+ [[package]]
+ name = "codex-app-server-test-client"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2318,7 +2318,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-transport"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "axum",
+  "base64 0.22.1",
+@@ -2360,7 +2360,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-apply-patch"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2380,7 +2380,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-arg0"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-apply-patch",
+@@ -2403,7 +2403,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-async-utils"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "pretty_assertions",
+  "rand 0.9.3",
+@@ -2413,7 +2413,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-attachment-store"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "pretty_assertions",
+  "serde",
+@@ -2423,7 +2423,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-aws-auth"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "aws-config",
+  "aws-credential-types",
+@@ -2449,7 +2449,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-client"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-api",
+@@ -2469,7 +2469,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-openapi-models"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "serde",
+  "serde_json",
+@@ -2478,7 +2478,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-build-info"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-install-context",
+  "pretty_assertions",
+@@ -2491,7 +2491,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-bwrap"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "cc",
+  "libc",
+@@ -2500,7 +2500,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-chatgpt"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2522,7 +2522,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cli"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2625,7 +2625,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-client"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-http-client",
+  "eventsource-stream",
+@@ -2639,7 +2639,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-client"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "async-stream",
+@@ -2663,7 +2663,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-config"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -2689,7 +2689,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2722,7 +2722,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-client"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2737,7 +2737,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-mock-client"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "chrono",
+  "codex-cloud-tasks-client",
+@@ -2746,7 +2746,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-code-mode-protocol",
+  "codex-http-client",
+@@ -2770,7 +2770,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-host"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2799,7 +2799,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-protocol"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-protocol",
+  "glob",
+@@ -2817,7 +2817,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-runtime"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-code-mode-protocol",
+@@ -2835,11 +2835,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-collaboration-mode-templates"
+-version = "0.0.0"
++version = "0.1.0"
+ 
+ [[package]]
+ name = "codex-config"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2889,7 +2889,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-config-schema"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2898,7 +2898,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2920,7 +2920,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors-extension"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-connectors",
+  "codex-core-plugins",
+@@ -2934,7 +2934,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-context-fragments"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-protocol-test-support",
+@@ -2945,7 +2945,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3090,7 +3090,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-api"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-analytics",
+  "codex-app-server-protocol",
+@@ -3113,7 +3113,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-plugin-common"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "semver",
+@@ -3124,7 +3124,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-plugins"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3181,7 +3181,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-diagnostics"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -3189,7 +3189,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -3242,7 +3242,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3314,7 +3314,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-protocol"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-file-system",
+@@ -3332,7 +3332,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-test-support"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-exec-server",
+@@ -3347,7 +3347,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-execpolicy"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3365,7 +3365,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-experimental-api-macros"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -3374,7 +3374,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-api"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-api",
+  "codex-config",
+@@ -3396,7 +3396,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-items"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "pretty_assertions",
+@@ -3408,7 +3408,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-external-agent-migration"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "chrono",
+  "codex-analytics",
+@@ -3439,7 +3439,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-features"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-network-proxy",
+  "codex-protocol",
+@@ -3453,7 +3453,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-feedback"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "bytes",
+@@ -3480,7 +3480,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-search"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3496,7 +3496,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-system"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "bytes",
+  "codex-protocol",
+@@ -3509,7 +3509,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-watcher"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "notify",
+  "pretty_assertions",
+@@ -3520,7 +3520,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-git-attribution"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-backend-client",
+  "codex-extension-api",
+@@ -3533,7 +3533,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-git-utils"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3561,7 +3561,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-goal-extension"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3586,7 +3586,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-context"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-context-fragments",
+  "codex-history",
+@@ -3599,7 +3599,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-reviewer"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-analytics",
+@@ -3624,7 +3624,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-v2"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-analytics",
+@@ -3663,7 +3663,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-history"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-protocol",
+@@ -3675,7 +3675,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-history-notes-extension"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-analytics",
+  "codex-client",
+@@ -3700,7 +3700,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-home"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-extension-api",
+  "codex-utils-absolute-path",
+@@ -3712,7 +3712,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-hooks"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "async-channel",
+@@ -3741,7 +3741,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-http-client"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "bytes",
+  "codex-utils-cargo-bin",
+@@ -3777,7 +3777,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-image-generation-extension"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3809,7 +3809,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-install-context"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "codex-utils-home-dir",
+@@ -3822,7 +3822,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-keyring-store"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "keyring",
+  "pretty_assertions",
+@@ -3833,7 +3833,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-linux-sandbox"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "clap",
+  "codex-core",
+@@ -3862,7 +3862,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-lmstudio"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-core",
+  "codex-http-client",
+@@ -3876,7 +3876,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-login"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3922,7 +3922,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3965,7 +3965,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp-extension"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -3998,7 +3998,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-extension"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-core",
+  "codex-extension-api",
+@@ -4020,7 +4020,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-read"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -4030,7 +4030,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-write"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4067,7 +4067,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mermaid"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "insta",
+  "pretty_assertions",
+@@ -4076,7 +4076,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-message-history"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-config",
+  "memchr",
+@@ -4090,7 +4090,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -4124,7 +4124,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider-info"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-client",
+  "codex-protocol",
+@@ -4142,7 +4142,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-models-manager"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "chrono",
+  "codex-http-client",
+@@ -4161,7 +4161,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-multi-env-copy-file"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-config",
+@@ -4187,7 +4187,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mxc-sandbox"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "appcontainer_common",
+@@ -4209,7 +4209,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-network-proxy"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4258,7 +4258,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ollama"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "assert_matches",
+  "async-stream",
+@@ -4278,7 +4278,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-otel"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "bytes",
+  "chrono",
+@@ -4315,7 +4315,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-otel-trace-websocket"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4326,7 +4326,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-plugin"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-config",
+  "codex-core-plugin-common",
+@@ -4341,7 +4341,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-process-hardening"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -4349,7 +4349,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-prompts"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-collaboration-mode-templates",
+@@ -4367,7 +4367,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-protocol"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "chardetng",
+@@ -4413,14 +4413,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-protocol-test-support"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-protocol",
+ ]
+ 
+ [[package]]
+ name = "codex-queue-extension"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -4441,7 +4441,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-realtime-webrtc"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-build-info",
+@@ -4460,7 +4460,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-response-debug-context"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -4471,7 +4471,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-responses-api-proxy"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4488,7 +4488,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rmcp-client"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4539,7 +4539,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4570,7 +4570,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout-trace"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-code-mode",
+@@ -4586,7 +4586,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-sandboxing"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-mxc-sandbox",
+@@ -4614,7 +4614,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-secrets"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "age",
+  "anyhow",
+@@ -4635,7 +4635,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-shell-command"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4658,7 +4658,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -4675,7 +4675,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills-extension"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "assert_matches",
+  "blake3",
+@@ -4714,7 +4714,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-state"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4742,7 +4742,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-stdio-to-uds"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-uds",
+@@ -4754,7 +4754,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tcp-tunnel"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "bytes",
+@@ -4775,7 +4775,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-terminal-detection"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "pretty_assertions",
+  "tracing",
+@@ -4783,7 +4783,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-test-binary-support"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-arg0",
+  "tempfile",
+@@ -4791,7 +4791,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-manager-sample"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4802,7 +4802,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-store"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "chrono",
+  "codex-app-server-protocol",
+@@ -4833,7 +4833,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tools"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "bitflags 2.13.1",
+  "codex-attachment-store",
+@@ -4858,7 +4858,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tui"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -4986,7 +4986,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-uds"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "async-io",
+  "libc",
+@@ -5000,7 +5000,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-user-verification"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "base64 0.22.1",
+  "block2",
+@@ -5021,7 +5021,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-absolute-path"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "dirs",
+  "dunce",
+@@ -5035,14 +5035,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-approval-presets"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-protocol",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-audio"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-protocol",
+@@ -5056,7 +5056,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cache"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "lru",
+  "sha1 0.10.6",
+@@ -5065,7 +5065,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cargo-bin"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "assert_cmd",
+  "runfiles",
+@@ -5074,7 +5074,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cli"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "clap",
+  "codex-protocol",
+@@ -5086,15 +5086,15 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-elapsed"
+-version = "0.0.0"
++version = "0.1.0"
+ 
+ [[package]]
+ name = "codex-utils-fuzzy-match"
+-version = "0.0.0"
++version = "0.1.0"
+ 
+ [[package]]
+ name = "codex-utils-git-discovery"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-git-utils",
+  "codex-utils-absolute-path",
+@@ -5107,7 +5107,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-home-dir"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dirs",
+@@ -5117,7 +5117,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-image"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-cache",
+@@ -5131,7 +5131,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-json-to-toml"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "pretty_assertions",
+  "serde_json",
+@@ -5140,7 +5140,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-oss"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-core",
+  "codex-lmstudio",
+@@ -5150,7 +5150,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-output-truncation"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -5160,7 +5160,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dunce",
+@@ -5171,7 +5171,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path-uri"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-absolute-path",
+@@ -5187,7 +5187,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-plugins"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-exec-server",
+  "codex-exec-server-protocol",
+@@ -5201,7 +5201,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-process"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "pretty_assertions",
+  "tokio",
+@@ -5209,7 +5209,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-pty"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-utils-cargo-bin",
+@@ -5228,7 +5228,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-readiness"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "assert_matches",
+  "thiserror 2.0.18",
+@@ -5238,7 +5238,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-redacted-string"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "schemars 0.8.22",
+  "serde",
+@@ -5246,14 +5246,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-rustls-provider"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "rustls",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-sandbox-summary"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-absolute-path",
+@@ -5263,7 +5263,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-sleep-inhibitor"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "core-foundation 0.9.4",
+  "libc",
+@@ -5273,14 +5273,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-stream-parser"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-string"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "pretty_assertions",
+  "regex-lite",
+@@ -5290,14 +5290,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-template"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-v8-poc"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "pretty_assertions",
+  "v8",
+@@ -5305,7 +5305,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-voice-host"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-install-context",
+@@ -5332,7 +5332,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-web-search-extension"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-api",
+  "codex-core",
+@@ -5354,7 +5354,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-websocket-auth"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -5373,7 +5373,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-websocket-client"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-http-client",
+  "codex-utils-rustls-provider",
+@@ -5389,7 +5389,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-windows-sandbox"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -5419,7 +5419,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-windows-sandbox-service"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-cloud-config",
+@@ -5437,14 +5437,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-windows-sandbox-test-support"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "dirs",
+ ]
+ 
+ [[package]]
+ name = "codex-workload-identity"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "codex-http-client",
+  "pretty_assertions",
+@@ -5459,7 +5459,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-worktree"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "codex-git-utils",
+@@ -5712,7 +5712,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "core_test_support"
+-version = "0.0.0"
++version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+diff --git a/codex-rs/Cargo.toml b/codex-rs/Cargo.toml
+index 785f7add9e..00ef308650 100644
+--- a/codex-rs/Cargo.toml
++++ b/codex-rs/Cargo.toml
+@@ -161,7 +161,7 @@ members = [
+ resolver = "2"
+ 
+ [workspace.package]
+-version = "0.0.0"
++version = "0.1.0"
+ # Track the edition for all workspace crates in one place. Individual
+ # crates can still override this value, but keeping it here means new
+ # crates created with `cargo new -w ...` automatically inherit the 2024
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/environment.rs b/codex-rs/app-server-protocol/src/protocol/v2/environment.rs
+index 3794780c18..c17ab26f37 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/environment.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/environment.rs
+@@ -143,7 +143,7 @@ pub enum EnvironmentStatusKind {
+ #[serde(rename_all = "camelCase")]
+ #[ts(export_to = "v2/")]
+ pub struct EnvironmentShellInfo {
+-    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, or `cmd`.
++    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, `cmd`, or `niu`.
+     pub name: String,
+     /// Target-native shell executable path or command name.
+     pub path: String,
+diff --git a/codex-rs/apply-patch/src/invocation.rs b/codex-rs/apply-patch/src/invocation.rs
+index 203a161611..b2c2398c21 100644
+--- a/codex-rs/apply-patch/src/invocation.rs
++++ b/codex-rs/apply-patch/src/invocation.rs
+@@ -62,6 +62,7 @@ fn classify_shell_name(shell: &str, convention: PathConvention) -> Option<String
+ fn classify_shell(shell: &str, flag: &str, convention: PathConvention) -> Option<ApplyPatchShell> {
+     classify_shell_name(shell, convention).and_then(|name| match name.as_str() {
+         "bash" | "zsh" | "sh" if matches!(flag, "-lc" | "-c") => Some(ApplyPatchShell::Unix),
++        "niu" if matches!(flag, "-C" | "--repl-command" | "-c") => Some(ApplyPatchShell::Unix),
+         "pwsh" | "powershell" if flag.eq_ignore_ascii_case("-command") => {
+             Some(ApplyPatchShell::PowerShell)
+         }
+@@ -428,6 +429,10 @@ mod tests {
+         strs_to_strings(&["bash", "-lc", script])
+     }
+ 
++    fn args_niu(script: &str) -> Vec<String> {
++        strs_to_strings(&["niu.exe", "-C", script])
++    }
++
+     fn args_powershell(script: &str) -> Vec<String> {
+         strs_to_strings(&["powershell.exe", "-Command", script])
+     }
+@@ -606,6 +611,12 @@ mod tests {
+         assert_match_args(args, /*expected_workdir*/ None);
+     }
+ 
++    #[tokio::test]
++    async fn test_niu_heredoc() {
++        let script = heredoc_script("cd foo && ");
++        assert_match_args(args_niu(&script), Some("foo"));
++    }
++
+     #[tokio::test]
+     async fn test_heredoc_applypatch() {
+         let args = strs_to_strings(&[
+diff --git a/codex-rs/cli/src/debug_sandbox.rs b/codex-rs/cli/src/debug_sandbox.rs
+index c0efcdb1f6..992a7719ad 100644
+--- a/codex-rs/cli/src/debug_sandbox.rs
++++ b/codex-rs/cli/src/debug_sandbox.rs
+@@ -589,6 +589,7 @@ async fn run_command_under_windows_session(
+         timeout_ms: None,
+         read_roots_override: None,
+         read_roots_include_platform_defaults: false,
++        additional_read_roots: &[],
+         write_roots_override: None,
+         deny_read_paths_override: &deny_read_paths,
+         deny_write_paths_override: empty_paths,
+diff --git a/codex-rs/core/src/command_canonicalization_tests.rs b/codex-rs/core/src/command_canonicalization_tests.rs
+index c278dedafc..cff4328684 100644
+--- a/codex-rs/core/src/command_canonicalization_tests.rs
++++ b/codex-rs/core/src/command_canonicalization_tests.rs
+@@ -53,6 +53,25 @@ fn canonicalizes_heredoc_scripts_to_stable_script_key() {
+     );
+ }
+ 
++#[test]
++fn canonicalizes_niu_scripts_like_other_bash_like_shells() {
++    let command = vec![
++        "niu.exe".to_string(),
++        "-C".to_string(),
++        "cargo test -p codex-core".to_string(),
++    ];
++
++    assert_eq!(
++        canonicalize_command_for_approval(&command),
++        vec![
++            "cargo".to_string(),
++            "test".to_string(),
++            "-p".to_string(),
++            "codex-core".to_string(),
++        ]
++    );
++}
++
+ #[test]
+ fn canonicalizes_powershell_wrappers_to_stable_script_key() {
+     let script = "Write-Host hi";
+diff --git a/codex-rs/core/src/exec.rs b/codex-rs/core/src/exec.rs
+index f72396e383..776305a94d 100644
+--- a/codex-rs/core/src/exec.rs
++++ b/codex-rs/core/src/exec.rs
+@@ -707,6 +707,7 @@ async fn exec_windows_sandbox(
+                     read_roots_override: elevated_read_roots_override.as_deref(),
+                     read_roots_include_platform_defaults:
+                         elevated_read_roots_include_platform_defaults,
++                    additional_read_roots: &[],
+                     write_roots_override: elevated_write_roots_override.as_deref(),
+                     deny_read_paths_override: &additional_deny_read_paths,
+                     deny_write_paths_override: &additional_deny_write_paths,
+diff --git a/codex-rs/core/src/exec_policy.rs b/codex-rs/core/src/exec_policy.rs
+index 7e307e4f4a..f6fb827cd0 100644
+--- a/codex-rs/core/src/exec_policy.rs
++++ b/codex-rs/core/src/exec_policy.rs
+@@ -143,6 +143,16 @@ pub(crate) static BANNED_PREFIX_SUGGESTIONS: &[&[&str]] = &[
+     &["zsh"],
+     &["zsh", "-c"],
+     &["zsh", "-lc"],
++    &["niu"],
++    &["niu", "-C"],
++    &["niu", "-c"],
++    &["niu", "-lc"],
++    &["niu", "--repl-command"],
++    &["niu.exe"],
++    &["niu.exe", "-C"],
++    &["niu.exe", "-c"],
++    &["niu.exe", "-lc"],
++    &["niu.exe", "--repl-command"],
+ ];
+ 
+ /// Describes which unmatched-command heuristics should classify the command
+diff --git a/codex-rs/core/src/exec_policy_tests.rs b/codex-rs/core/src/exec_policy_tests.rs
+index c17b910a26..32d21e0e34 100644
+--- a/codex-rs/core/src/exec_policy_tests.rs
++++ b/codex-rs/core/src/exec_policy_tests.rs
+@@ -1991,6 +1991,13 @@ fn derive_requested_execpolicy_amendment_returns_none_for_shell_and_powershell_v
+         vec!["sh".to_string(), "-c".to_string()],
+         vec!["sh".to_string(), "-lc".to_string()],
+         vec!["zsh".to_string(), "-lc".to_string()],
++        vec!["niu".to_string()],
++        vec!["niu".to_string(), "-C".to_string()],
++        vec!["niu".to_string(), "-c".to_string()],
++        vec!["niu".to_string(), "--repl-command".to_string()],
++        vec!["niu.exe".to_string(), "-C".to_string()],
++        vec!["niu.exe".to_string(), "-c".to_string()],
++        vec!["niu.exe".to_string(), "--repl-command".to_string()],
+         vec!["/bin/bash".to_string(), "-lc".to_string()],
+         vec!["/bin/zsh".to_string(), "-lc".to_string()],
+         vec!["pwsh".to_string()],
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 1713ec1a5b..f93a0997e9 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -1705,7 +1705,17 @@ async fn user_shell_commands_do_not_inherit_managed_network_proxy() -> anyhow::R
+     assert!(turn_context.network.is_some());
+ 
+     #[cfg(windows)]
+-    let command = r#"$val = $env:HTTP_PROXY; if ([string]::IsNullOrEmpty($val)) { $val = 'not-set' } ; [System.Console]::Write($val)"#.to_string();
++    // The Windows default shell depends on what is installed (PowerShell or a
++    // bash-like shell such as NiuBash), so match the command to its family.
++    let command = {
++        use codex_shell_command::shell_detect::ShellType;
++        match codex_shell_command::shell_detect::default_user_shell().shell_type {
++            ShellType::PowerShell | ShellType::Cmd => {
++                r#"$val = $env:HTTP_PROXY; if ([string]::IsNullOrEmpty($val)) { $val = 'not-set' } ; [System.Console]::Write($val)"#.to_string()
++            }
++            _ => r#"printf '%s' "${HTTP_PROXY:-not-set}""#.to_string(),
++        }
++    };
+     #[cfg(not(windows))]
+     let command = r#"sh -c "printf '%s' \"${HTTP_PROXY:-not-set}\"""#.to_string();
+ 
+diff --git a/codex-rs/core/src/shell.rs b/codex-rs/core/src/shell.rs
+index da0fbbea1f..2ad48f6a92 100644
+--- a/codex-rs/core/src/shell.rs
++++ b/codex-rs/core/src/shell.rs
+@@ -31,6 +31,14 @@ impl Shell {
+                     command.to_string(),
+                 ]
+             }
++            ShellType::Niu => {
++                let arg = if use_login_shell { "-C" } else { "-c" };
++                vec![
++                    self.shell_path.to_string_lossy().to_string(),
++                    arg.to_string(),
++                    command.to_string(),
++                ]
++            }
+             ShellType::PowerShell => {
+                 let mut args = vec![self.shell_path.to_string_lossy().to_string()];
+                 if !use_login_shell {
+@@ -68,6 +76,7 @@ impl Shell {
+             "powershell" => ShellType::PowerShell,
+             "sh" => ShellType::Sh,
+             "cmd" => ShellType::Cmd,
++            "niu" => ShellType::Niu,
+             name => anyhow::bail!("unknown environment shell `{name}`"),
+         };
+ 
+@@ -167,6 +176,28 @@ pub fn default_user_shell() -> Shell {
+     codex_shell_command::shell_detect::default_user_shell().into()
+ }
+ 
++#[cfg(test)]
++mod platform_independent_tests {
++    use super::*;
++
++    #[test]
++    fn niu_uses_profile_and_no_profile_exec_args() {
++        let shell = Shell {
++            shell_type: ShellType::Niu,
++            shell_path: PathBuf::from("niu.exe"),
++        };
++
++        assert_eq!(
++            shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
++            vec!["niu.exe", "-c", "echo hello"]
++        );
++        assert_eq!(
++            shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
++            vec!["niu.exe", "-C", "echo hello"]
++        );
++    }
++}
++
+ #[cfg(all(test, target_os = "macos"))]
+ fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Shell {
+     codex_shell_command::shell_detect::default_user_shell_from_path(user_shell_path).into()
+diff --git a/codex-rs/core/src/shell_snapshot.rs b/codex-rs/core/src/shell_snapshot.rs
+index 01bd13688a..f264f320bc 100644
+--- a/codex-rs/core/src/shell_snapshot.rs
++++ b/codex-rs/core/src/shell_snapshot.rs
+@@ -107,6 +107,13 @@ const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
+ const SNAPSHOT_RETENTION: Duration = Duration::from_secs(60 * 60 * 24 * 3); // 3 days retention.
+ const SNAPSHOT_DIR: &str = "shell_snapshots";
+ 
++fn shell_snapshot_supported(shell_type: ShellType) -> bool {
++    !matches!(
++        shell_type,
++        ShellType::PowerShell | ShellType::Cmd | ShellType::Niu
++    )
++}
++
+ impl ShellSnapshot {
+     pub(crate) fn new(
+         codex_home: AbsolutePathBuf,
+@@ -164,6 +171,10 @@ impl ShellSnapshot {
+         }
+ 
+         let shell = shell?;
++        if !shell_snapshot_supported(shell.shell_type) {
++            return None;
++        }
++
+         // TODO(anp): Migrate shell snapshot creation to accept PathUri and defer native
+         // conversion to the spawned shell process.
+         let cwd = cwd.to_abs_path().ok()?;
+@@ -546,7 +557,7 @@ async fn write_shell_snapshot(
+     sandbox: Option<&ShellSnapshotSandbox>,
+ ) -> Result<Option<SnapshotCredentials>> {
+     let shell_type = shell.shell_type;
+-    if shell_type == ShellType::PowerShell || shell_type == ShellType::Cmd {
++    if !shell_snapshot_supported(shell_type) {
+         bail!("Shell snapshot not supported yet for {shell_type:?}");
+     }
+     let (snapshot, credentials) = capture_snapshot(
+diff --git a/codex-rs/core/src/shell_snapshot_tests.rs b/codex-rs/core/src/shell_snapshot_tests.rs
+index fc191bf590..2481537361 100644
+--- a/codex-rs/core/src/shell_snapshot_tests.rs
++++ b/codex-rs/core/src/shell_snapshot_tests.rs
+@@ -239,6 +239,16 @@ async fn snapshot_helper_exec_metadata_child() -> Result<()> {
+     Ok(())
+ }
+ 
++#[test]
++fn shell_snapshot_support_excludes_non_replayable_shells() {
++    assert!(shell_snapshot_supported(ShellType::Bash));
++    assert!(shell_snapshot_supported(ShellType::Zsh));
++    assert!(shell_snapshot_supported(ShellType::Sh));
++    assert!(!shell_snapshot_supported(ShellType::PowerShell));
++    assert!(!shell_snapshot_supported(ShellType::Cmd));
++    assert!(!shell_snapshot_supported(ShellType::Niu));
++}
++
+ #[test]
+ fn snapshot_file_name_parser_supports_legacy_and_suffixed_names() {
+     let session_id = "019cf82b-6a62-7700-bbbd-46909794ef89";
+diff --git a/codex-rs/core/src/shell_tests.rs b/codex-rs/core/src/shell_tests.rs
+index 1077aba2b6..001023e9d9 100644
+--- a/codex-rs/core/src/shell_tests.rs
++++ b/codex-rs/core/src/shell_tests.rs
+@@ -142,6 +142,19 @@ fn derive_exec_args() {
+         test_powershell_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
+         vec!["pwsh.exe", "-Command", "echo hello"]
+     );
++
++    let test_niu_shell = Shell {
++        shell_type: ShellType::Niu,
++        shell_path: PathBuf::from("niu.exe"),
++    };
++    assert_eq!(
++        test_niu_shell.derive_exec_args("echo hello", /*use_login_shell*/ false),
++        vec!["niu.exe", "-c", "echo hello"]
++    );
++    assert_eq!(
++        test_niu_shell.derive_exec_args("echo hello", /*use_login_shell*/ true),
++        vec!["niu.exe", "-C", "echo hello"]
++    );
+ }
+ 
+ /// Diagnostics and `$LINENO` must refer to the original script, even with newlines in the package path.
+diff --git a/codex-rs/core/src/tools/handlers/shell_spec.rs b/codex-rs/core/src/tools/handlers/shell_spec.rs
+index 264a214f62..fe02f3d87b 100644
+--- a/codex-rs/core/src/tools/handlers/shell_spec.rs
++++ b/codex-rs/core/src/tools/handlers/shell_spec.rs
+@@ -331,6 +331,7 @@ fn file_system_permissions_schema() -> JsonSchema {
+ 
+ fn windows_shell_guidance() -> &'static str {
+     r#"Windows safety rules:
++- If `<shell>niu</shell>` appears in the environment context, commands run in Niu by default. For PowerShell-specific syntax, invoke PowerShell explicitly with `pwsh -Command ...` or `powershell.exe -Command ...`.
+ - Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.
+ - Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.
+ - When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control."#
+diff --git a/codex-rs/core/src/tools/runtimes/unified_exec.rs b/codex-rs/core/src/tools/runtimes/unified_exec.rs
+index a227c94a9e..1a109dfea7 100644
+--- a/codex-rs/core/src/tools/runtimes/unified_exec.rs
++++ b/codex-rs/core/src/tools/runtimes/unified_exec.rs
+@@ -731,7 +731,7 @@ async fn warn_if_remote_credential_masking_unavailable(
+     } else if match req.shell.shell.shell_type {
+         ShellType::Bash => req.shell.use_login_shell || req.shell_snapshot.is_some(),
+         ShellType::Zsh => !req.shell.use_login_shell || req.shell_snapshot.is_none(),
+-        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd => true,
++        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd | ShellType::Niu => true,
+     } {
+         format!(
+             "Credential masking is unavailable for this shell startup on environment `{environment_id}`. This command will run with unmasked credentials."
+diff --git a/codex-rs/docs/niu-first-class-shell-plan.md b/codex-rs/docs/niu-first-class-shell-plan.md
+new file mode 100644
+index 0000000000..b8bc3853c6
+--- /dev/null
++++ b/codex-rs/docs/niu-first-class-shell-plan.md
+@@ -0,0 +1,46 @@
++# NiuBash First-Class Shell Plan
++
++## Goal
++
++Make NiuBash a first-class Codex shell on Windows instead of relying only on a configurable shell path workaround.
++
++## Current Upstream Shape
++
++- Shell identity is centralized in `codex-shell-command::shell_detect::ShellType`.
++- Command argv generation happens in `codex-core::shell::Shell::derive_exec_args`.
++- Approval, safety, dangerous-command detection, and apply_patch interception reuse bash-like shell parsing for `bash`, `zsh`, and `sh`.
++- Windows currently defaults to PowerShell when no explicit shell path is provided.
++
++## Implementation Phases
++
++1. Add `ShellType::Niu`
++   - Recognize `niu` and `niu.exe`.
++   - Report the stable shell name as `niu`.
++   - Resolve via PATH first, then common Windows install locations.
++
++2. Make NiuBash the preferred Windows default
++   - On Windows, choose NiuBash when it is installed.
++   - Fall back to PowerShell and then the ultimate `cmd.exe` fallback.
++
++3. Generate native NiuBash exec argv
++   - Use `niu -C <script>` for login/profile calls so user configuration is loaded.
++   - Use `niu -c <script>` when login/profile loading is disabled.
++   - Do not emit `-lc`; current NiuBash exposes `-C` instead of bash/zsh-style login-shell flags.
++
++4. Integrate Codex safety behavior
++   - Treat NiuBash as bash-like for command parsing, safe-command checks, dangerous-command checks, approval canonicalization, and apply_patch heredoc interception.
++   - Ban broad persisted approval prefixes such as `niu`, `niu -C`, `niu --repl-command`, and `niu -c`.
++
++5. Preserve environment/snapshot behavior
++   - Use the portable sh snapshot script for NiuBash when snapshotting is available.
++   - Keep PowerShell-only UTF-8 and profile handling scoped to PowerShell.
++
++6. Update protocol comments and tests
++   - Document `niu` as a stable shell name.
++   - Add targeted tests for detection, argv generation, safety parsing, dangerous parsing, canonicalization, and apply_patch interception.
++
++## Follow-Up Work
++
++- Add a formal user-facing config knob only if upstream wants shell selection to be configurable independently from auto-detection.
++- Add NiuBash CI coverage once a stable installer or test binary is available on Windows runners.
++- Consider adding `-lc` compatibility in NiuBash itself later; Codex should not depend on it for first-class support.
+diff --git a/codex-rs/exec-server-protocol/src/protocol.rs b/codex-rs/exec-server-protocol/src/protocol.rs
+index b246f87837..99846752ee 100644
+--- a/codex-rs/exec-server-protocol/src/protocol.rs
++++ b/codex-rs/exec-server-protocol/src/protocol.rs
+@@ -305,7 +305,7 @@ impl EnvironmentInfo {
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct ShellInfo {
+-    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, or `cmd`.
++    /// Stable shell name, for example `zsh`, `bash`, `powershell`, `sh`, `cmd`, or `niu`.
+     pub name: String,
+     /// Target-native shell executable path or command name. Fallbacks such as `cmd.exe` need not
+     /// be absolute, so this is not a [`PathUri`].
+diff --git a/codex-rs/sandboxing/src/manager.rs b/codex-rs/sandboxing/src/manager.rs
+index f6c281a061..63e9b9cfde 100644
+--- a/codex-rs/sandboxing/src/manager.rs
++++ b/codex-rs/sandboxing/src/manager.rs
+@@ -633,11 +633,31 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
+     };
+     // transform() may have made the inner command a Codex helper. Only that
+     // helper needs materializing; an arbitrary workload such as cmd.exe does not.
+-    if Path::new(program.as_str()) == sandbox_exe {
+-        let helper = codex_windows_sandbox::resolve_exe_for_launch(sandbox_exe, codex_home);
++    let source = std::path::PathBuf::from(&program);
++    let materialized_helper = (Path::new(program.as_str()) == sandbox_exe)
++        .then(|| codex_windows_sandbox::resolve_exe_for_launch(sandbox_exe, codex_home));
++    if let Some(helper) = &materialized_helper {
+         *program = helper.to_string_lossy().into_owned();
+     }
+ 
++    // The sandboxed child must be able to reach the workload it is asked to
++    // launch. An external shell such as niu.exe can live outside the configured
++    // read roots, and a materialized helper lands in the codex helper bin dir.
++    let mut additional_read_roots = Vec::new();
++    for path in [Some(source.as_path()), materialized_helper.as_deref()] {
++        let Some(path) = path else {
++            continue;
++        };
++        if path.is_absolute()
++            && let Some(parent) = path.parent()
++        {
++            let parent = parent.to_path_buf();
++            if !additional_read_roots.iter().any(|root| root == &parent) {
++                additional_read_roots.push(parent);
++            }
++        }
++    }
++
+     let inner_command = std::mem::take(&mut request.command);
+     let proxy_enforced = request.network.is_some();
+     let network_proxy_restricting_sid = request
+@@ -700,6 +720,7 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
+             proxy_settings_mode,
+             read_roots_override,
+             read_roots_include_platform_defaults,
++            additional_read_roots.as_slice(),
+             write_roots_override,
+             deny_read_paths_override,
+             deny_write_paths_override,
+diff --git a/codex-rs/sandboxing/src/manager_tests.rs b/codex-rs/sandboxing/src/manager_tests.rs
+index 22dcf91632..99e93617f7 100644
+--- a/codex-rs/sandboxing/src/manager_tests.rs
++++ b/codex-rs/sandboxing/src/manager_tests.rs
+@@ -813,6 +813,19 @@ fn transform_for_direct_spawn_windows_materializes_inner_helper() {
+             .iter()
+             .any(|arg| arg == "--deny-write-paths-json")
+     );
++    let additional_read_roots_json = exec_request
++        .command
++        .windows(2)
++        .find_map(|args| (args[0] == "--additional-read-roots-json").then_some(&args[1]))
++        .expect("additional read roots");
++    let additional_read_roots =
++        serde_json::from_str::<Vec<std::path::PathBuf>>(additional_read_roots_json)
++            .expect("parse additional read roots");
++    assert!(
++        additional_read_roots
++            .iter()
++            .any(|root| root == helper_dir.path())
++    );
+     assert_eq!(
+         exec_request.command[separator_index + 2],
+         "--codex-run-as-fs-helper"
+diff --git a/codex-rs/sandboxing/src/spawn.rs b/codex-rs/sandboxing/src/spawn.rs
+index 86d2878fbd..489e0e29a6 100644
+--- a/codex-rs/sandboxing/src/spawn.rs
++++ b/codex-rs/sandboxing/src/spawn.rs
+@@ -82,6 +82,7 @@ pub async fn spawn_process(request: SpawnRequest<'_>) -> Result<SpawnedProcess>
+                         .and_then(|value| value.read_roots_override.as_deref()),
+                     read_roots_include_platform_defaults: overrides
+                         .is_some_and(|value| value.read_roots_include_platform_defaults),
++                    additional_read_roots: &[],
+                     write_roots_override: overrides
+                         .and_then(|value| value.write_roots_override.as_deref()),
+                     deny_read_paths_override: overrides.map_or(empty_paths, |value| {
+diff --git a/codex-rs/shell-command/src/bash.rs b/codex-rs/shell-command/src/bash.rs
+index ddd5807bfc..5803147500 100644
+--- a/codex-rs/shell-command/src/bash.rs
++++ b/codex-rs/shell-command/src/bash.rs
+@@ -107,12 +107,15 @@ pub fn extract_bash_command(command: &[String]) -> Option<(&str, &str)> {
+     let [shell, flag, script] = command else {
+         return None;
+     };
+-    if !matches!(flag.as_str(), "-lc" | "-c")
+-        || !matches!(
+-            detect_shell_type(PathBuf::from(shell)),
+-            Some(ShellType::Zsh) | Some(ShellType::Bash) | Some(ShellType::Sh)
+-        )
+-    {
++    let shell_type = detect_shell_type(PathBuf::from(shell));
++    let valid_shell_flag = match shell_type {
++        Some(ShellType::Zsh | ShellType::Bash | ShellType::Sh) => {
++            matches!(flag.as_str(), "-lc" | "-c")
++        }
++        Some(ShellType::Niu) => matches!(flag.as_str(), "-C" | "--repl-command" | "-c"),
++        _ => false,
++    };
++    if !valid_shell_flag {
+         return None;
+     }
+     Some((shell, script))
+@@ -520,6 +523,23 @@ mod tests {
+         assert_eq!(parsed, vec![vec!["ls".to_string()]]);
+     }
+ 
++    #[test]
++    fn parse_niu_repl_command_plain_commands() {
++        for flag in ["-C", "--repl-command"] {
++            let command = vec![
++                "niu".to_string(),
++                flag.to_string(),
++                "git status".to_string(),
++            ];
++            let parsed = parse_shell_lc_plain_commands(&command).unwrap();
++            assert_eq!(
++                parsed,
++                vec![vec!["git".to_string(), "status".to_string()]],
++                "{flag}"
++            );
++        }
++    }
++
+     #[test]
+     fn accepts_concatenated_flag_and_value() {
+         // Test case: -g"*.py" (flag directly concatenated with quoted value)
+diff --git a/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs b/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
+index 2440f17001..6854bd2075 100644
+--- a/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
++++ b/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
+@@ -298,6 +298,15 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn forced_rm_in_niu_script_is_dangerous() {
++        let command = vec_str(&["niu", "-C", "echo ok && rm -rf /tmp/example"]);
++        assert_eq!(
++            dangerous_command_match(&command),
++            Some(DangerousCommandMatch::ForcedRm)
++        );
++    }
++
+     #[test]
+     fn non_forced_or_non_literal_rm_is_not_dangerous() {
+         for command in [
+diff --git a/codex-rs/shell-command/src/parse_command.rs b/codex-rs/shell-command/src/parse_command.rs
+index 01768d0a7a..569b12ae25 100644
+--- a/codex-rs/shell-command/src/parse_command.rs
++++ b/codex-rs/shell-command/src/parse_command.rs
+@@ -346,6 +346,21 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn niu_repl_command_supports_cat() {
++        let inner = "cat README.md";
++        for flag in ["-C", "--repl-command"] {
++            assert_parsed(
++                &vec_str(&["niu", flag, inner]),
++                vec![ParsedCommand::Read {
++                    cmd: inner.to_string(),
++                    name: "README.md".to_string(),
++                    path: PathBuf::from("README.md"),
++                }],
++            );
++        }
++    }
++
+     #[test]
+     fn supports_bat() {
+         let inner = "bat --theme TwoDark README.md";
+diff --git a/codex-rs/shell-command/src/shell_detect.rs b/codex-rs/shell-command/src/shell_detect.rs
+index 3aecd03d93..44e6b1ecaa 100644
+--- a/codex-rs/shell-command/src/shell_detect.rs
++++ b/codex-rs/shell-command/src/shell_detect.rs
+@@ -10,6 +10,7 @@ pub enum ShellType {
+     PowerShell,
+     Sh,
+     Cmd,
++    Niu,
+ }
+ 
+ impl ShellType {
+@@ -20,6 +21,7 @@ impl ShellType {
+             Self::PowerShell => "powershell",
+             Self::Sh => "sh",
+             Self::Cmd => "cmd",
++            Self::Niu => "niu",
+         }
+     }
+ }
+@@ -45,6 +47,7 @@ pub fn detect_shell_type(shell_path: impl AsRef<std::path::Path>) -> Option<Shel
+         Some("bash") => Some(ShellType::Bash),
+         Some("pwsh") => Some(ShellType::PowerShell),
+         Some("powershell") => Some(ShellType::PowerShell),
++        Some("niu") => Some(ShellType::Niu),
+         _ => {
+             let shell_name = shell_path.file_stem();
+             if let Some(shell_name) = shell_name {
+@@ -325,6 +328,40 @@ fn get_cmd_shell() -> Option<DetectedShell> {
+     })
+ }
+ 
++#[cfg(windows)]
++const NIU_FALLBACK_PATHS: &[&str] = &[
++    r#"C:\Program Files\Niubash\niu.exe"#,
++    r#"C:\Program Files (x86)\Niubash\niu.exe"#,
++];
++
++#[cfg(windows)]
++fn get_local_app_data_niu_shell_path() -> Option<PathBuf> {
++    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
++    file_exists(
++        std::path::Path::new(&local_app_data)
++            .join("Programs")
++            .join("Niubash")
++            .join("niu.exe")
++            .as_path(),
++    )
++}
++
++#[cfg(windows)]
++fn get_niu_shell() -> Option<DetectedShell> {
++    let shell_path = get_shell_path(ShellType::Niu, "niu", NIU_FALLBACK_PATHS)
++        .or_else(get_local_app_data_niu_shell_path);
++
++    shell_path.map(|shell_path| DetectedShell {
++        shell_type: ShellType::Niu,
++        shell_path,
++    })
++}
++
++#[cfg(not(windows))]
++fn get_niu_shell() -> Option<DetectedShell> {
++    None
++}
++
+ pub fn ultimate_fallback_shell() -> DetectedShell {
+     if cfg!(windows) {
+         DetectedShell {
+@@ -353,6 +390,7 @@ pub fn get_shell(shell_type: ShellType) -> Option<DetectedShell> {
+         ShellType::PowerShell => get_powershell_shell(),
+         ShellType::Sh => get_sh_shell(),
+         ShellType::Cmd => get_cmd_shell(),
++        ShellType::Niu => get_niu_shell(),
+     }
+ }
+ 
+@@ -362,7 +400,14 @@ pub fn default_user_shell() -> DetectedShell {
+ 
+ pub fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> DetectedShell {
+     if cfg!(windows) {
+-        get_shell(ShellType::PowerShell).unwrap_or_else(ultimate_fallback_shell)
++        let user_default_shell = user_shell_path
++            .and_then(|shell| detect_shell_type(&shell))
++            .and_then(get_shell);
++
++        user_default_shell
++            .or_else(|| get_shell(ShellType::Niu))
++            .or_else(|| get_shell(ShellType::PowerShell))
++            .unwrap_or_else(ultimate_fallback_shell)
+     } else {
+         let user_default_shell = user_shell_path
+             .and_then(|shell| detect_shell_type(&shell))
+@@ -457,6 +502,14 @@ mod tests {
+             detect_shell_type(PathBuf::from("powershell")),
+             Some(ShellType::PowerShell)
+         );
++        assert_eq!(
++            detect_shell_type(PathBuf::from("niu")),
++            Some(ShellType::Niu)
++        );
++        assert_eq!(
++            detect_shell_type(PathBuf::from("niu.exe")),
++            Some(ShellType::Niu)
++        );
+         assert_eq!(detect_shell_type(PathBuf::from("fish")), None);
+         assert_eq!(detect_shell_type(PathBuf::from("other")), None);
+         assert_eq!(
+@@ -504,5 +557,22 @@ mod tests {
+             detect_shell_type(PathBuf::from("cmd.exe")),
+             Some(ShellType::Cmd)
+         );
++        assert_eq!(
++            detect_shell_type(PathBuf::from(if cfg!(windows) {
++                r"C:\Users\example\AppData\Local\Programs\Niu\niu.exe"
++            } else {
++                "/usr/local/bin/niu"
++            })),
++            Some(ShellType::Niu)
++        );
++    }
++
++    #[test]
++    fn windows_default_user_shell_prefers_niu_when_available() {
++        if !cfg!(windows) || get_shell(ShellType::Niu).is_none() {
++            return;
++        }
++
++        assert_eq!(default_user_shell().shell_type, ShellType::Niu);
+     }
+ }
+diff --git a/codex-rs/shell-command/src/shell_snapshot_capture.rs b/codex-rs/shell-command/src/shell_snapshot_capture.rs
+index 9ffadc6074..7207a27ba8 100644
+--- a/codex-rs/shell-command/src/shell_snapshot_capture.rs
++++ b/codex-rs/shell-command/src/shell_snapshot_capture.rs
+@@ -79,7 +79,7 @@ fn capture_script(
+         ShellType::Zsh => zsh_snapshot_script(options.startup),
+         ShellType::Bash => bash_snapshot_script(options.startup),
+         ShellType::Sh => sh_snapshot_script(options.startup),
+-        ShellType::PowerShell | ShellType::Cmd => return None,
++        ShellType::PowerShell | ShellType::Cmd | ShellType::Niu => return None,
+     };
+     let declarations = if options.declarations {
+         exports::script(shell_type)
+diff --git a/codex-rs/shell-command/src/shell_snapshot_exports.rs b/codex-rs/shell-command/src/shell_snapshot_exports.rs
+index 96ac267eb2..93bf09a18a 100644
+--- a/codex-rs/shell-command/src/shell_snapshot_exports.rs
++++ b/codex-rs/shell-command/src/shell_snapshot_exports.rs
+@@ -70,7 +70,7 @@ done
+ fi
+ "#
+         }
+-        ShellType::PowerShell | ShellType::Cmd => return String::new(),
++        ShellType::PowerShell | ShellType::Cmd | ShellType::Niu => return String::new(),
+     };
+     script
+         .replace(
+diff --git a/codex-rs/shell-command/src/startup.rs b/codex-rs/shell-command/src/startup.rs
+index ede02e0512..c393ea24ed 100644
+--- a/codex-rs/shell-command/src/startup.rs
++++ b/codex-rs/shell-command/src/startup.rs
+@@ -25,6 +25,6 @@ fi
+ fi
+ "#
+         }
+-        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd => "",
++        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd | ShellType::Niu => "",
+     }
+ }
+diff --git a/codex-rs/windows-sandbox-rs/src/elevated_impl.rs b/codex-rs/windows-sandbox-rs/src/elevated_impl.rs
+index 69cdb39ea6..2b45937f6a 100644
+--- a/codex-rs/windows-sandbox-rs/src/elevated_impl.rs
++++ b/codex-rs/windows-sandbox-rs/src/elevated_impl.rs
+@@ -17,6 +17,7 @@ pub struct ElevatedSandboxProfileCaptureRequest<'a> {
+     pub network_proxy_restricting_sid: Option<String>,
+     pub read_roots_override: Option<&'a [PathBuf]>,
+     pub read_roots_include_platform_defaults: bool,
++    pub additional_read_roots: &'a [PathBuf],
+     pub write_roots_override: Option<&'a [PathBuf]>,
+     pub deny_read_paths_override: &'a [AbsolutePathBuf],
+     pub deny_write_paths_override: &'a [AbsolutePathBuf],
+@@ -113,6 +114,7 @@ mod windows_impl {
+             network_proxy_restricting_sid,
+             read_roots_override,
+             read_roots_include_platform_defaults,
++            additional_read_roots,
+             write_roots_override,
+             deny_read_paths_override,
+             deny_write_paths_override,
+@@ -147,6 +149,7 @@ mod windows_impl {
+             codex_home,
+             read_roots_override,
+             read_roots_include_platform_defaults,
++            additional_read_roots,
+             write_roots_override,
+             &deny_read_paths_override,
+             &deny_write_paths_override,
+@@ -236,6 +239,7 @@ mod windows_impl {
+                         codex_home,
+                         read_roots_override,
+                         read_roots_include_platform_defaults,
++                        additional_read_roots,
+                         write_roots_override,
+                         &deny_read_paths_override,
+                         &deny_write_paths_override,
+diff --git a/codex-rs/windows-sandbox-rs/src/identity.rs b/codex-rs/windows-sandbox-rs/src/identity.rs
+index 022c9f8ee5..cd0fbdad3e 100644
+--- a/codex-rs/windows-sandbox-rs/src/identity.rs
++++ b/codex-rs/windows-sandbox-rs/src/identity.rs
+@@ -271,6 +271,7 @@ pub fn require_logon_sandbox_creds(
+     codex_home: &Path,
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[PathBuf],
+     deny_write_paths_override: &[PathBuf],
+@@ -278,11 +279,12 @@ pub fn require_logon_sandbox_creds(
+     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
+ ) -> Result<SandboxCreds> {
+     let runtime = crate::setup::current_setup_runtime();
+-    let needed_read = read_roots_override
++    let mut needed_read = read_roots_override
+         .map(<[PathBuf]>::to_vec)
+         .unwrap_or_else(|| {
+             gather_read_roots(command_cwd, permissions, env_map, codex_home, runtime)
+         });
++    needed_read.extend(additional_read_roots.iter().cloned());
+     let needed_write = write_roots_override
+         .map(<[PathBuf]>::to_vec)
+         .unwrap_or_else(|| gather_write_roots_for_permissions(permissions, command_cwd, env_map));
+@@ -487,6 +489,7 @@ pub(crate) fn refresh_logon_sandbox_creds(
+     codex_home: &Path,
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[PathBuf],
+     deny_write_paths_override: &[PathBuf],
+@@ -501,6 +504,7 @@ pub(crate) fn refresh_logon_sandbox_creds(
+         codex_home,
+         read_roots_override,
+         read_roots_include_platform_defaults,
++        additional_read_roots,
+         write_roots_override,
+         deny_read_paths_override,
+         deny_write_paths_override,
+diff --git a/codex-rs/windows-sandbox-rs/src/spawn_prep.rs b/codex-rs/windows-sandbox-rs/src/spawn_prep.rs
+index a19f0eeaac..56358d6f91 100644
+--- a/codex-rs/windows-sandbox-rs/src/spawn_prep.rs
++++ b/codex-rs/windows-sandbox-rs/src/spawn_prep.rs
+@@ -354,6 +354,7 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
+     command: &[String],
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[PathBuf],
+     deny_write_paths_override: &[PathBuf],
+@@ -406,6 +407,7 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
+         codex_home,
+         read_roots_override,
+         read_roots_include_platform_defaults,
++        additional_read_roots,
+         setup_write_roots_override,
+         deny_read_paths_override,
+         if deny_write_paths_override.is_empty() {
+diff --git a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated.rs b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated.rs
+index 0fd0ba9f56..f91579eac1 100644
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated.rs
+@@ -37,6 +37,7 @@ struct RunnerTransportRequest {
+     spawn_request: SpawnRequest,
+     read_roots_override: Option<Vec<PathBuf>>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: Vec<PathBuf>,
+     write_roots_override: Option<Vec<PathBuf>>,
+     deny_read_paths_override: Vec<PathBuf>,
+     deny_write_paths_override: Vec<PathBuf>,
+@@ -55,6 +56,7 @@ fn spawn_runner_transport_with_retry<T>(
+         &Path,
+         Option<&[PathBuf]>,
+         bool,
++        &[PathBuf],
+         Option<&[PathBuf]>,
+         &[PathBuf],
+         &[PathBuf],
+@@ -82,6 +84,7 @@ fn spawn_runner_transport_with_retry<T>(
+                 &request.codex_home,
+                 request.read_roots_override.as_deref(),
+                 request.read_roots_include_platform_defaults,
++                request.additional_read_roots.as_slice(),
+                 request.write_roots_override.as_deref(),
+                 &request.deny_read_paths_override,
+                 &request.deny_write_paths_override,
+@@ -160,6 +163,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
+     timeout_ms: Option<u64>,
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[AbsolutePathBuf],
+     deny_write_paths_override: &[AbsolutePathBuf],
+@@ -188,6 +192,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
+         &command,
+         read_roots_override,
+         read_roots_include_platform_defaults,
++        additional_read_roots,
+         write_roots_override,
+         &deny_read_paths_override,
+         &deny_write_paths_override,
+@@ -219,6 +224,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
+         },
+         read_roots_override: read_roots_override.map(<[PathBuf]>::to_vec),
+         read_roots_include_platform_defaults,
++        additional_read_roots: additional_read_roots.to_vec(),
+         write_roots_override: write_roots_override.map(<[PathBuf]>::to_vec),
+         deny_read_paths_override,
+         deny_write_paths_override,
+diff --git a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs
+index 7a3a8c3cf2..aef9e23e68 100644
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated_tests.rs
+@@ -40,6 +40,7 @@ struct RefreshObservation {
+     codex_home: PathBuf,
+     read_roots_override: Option<Vec<PathBuf>>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: Vec<PathBuf>,
+     write_roots_override: Option<Vec<PathBuf>>,
+     deny_read_paths_override: Vec<PathBuf>,
+     deny_write_paths_override: Vec<PathBuf>,
+@@ -87,6 +88,7 @@ fn runner_transport_request() -> RunnerTransportRequest {
+         },
+         read_roots_override: Some(vec![PathBuf::from(r"C:\workspace\read")]),
+         read_roots_include_platform_defaults: true,
++        additional_read_roots: vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\niu")],
+         write_roots_override: Some(vec![PathBuf::from(r"C:\workspace\write")]),
+         deny_read_paths_override: vec![PathBuf::from(r"C:\secrets")],
+         deny_write_paths_override: vec![PathBuf::from(r"C:\workspace\.codex")],
+@@ -107,6 +109,7 @@ fn retry_uses_original_unified_exec_request_and_stops_after_second_failure() {
+         codex_home: request.codex_home.clone(),
+         read_roots_override: request.read_roots_override.clone(),
+         read_roots_include_platform_defaults: true,
++        additional_read_roots: request.additional_read_roots.clone(),
+         write_roots_override: request.write_roots_override.clone(),
+         deny_read_paths_override: request.deny_read_paths_override.clone(),
+         deny_write_paths_override: request.deny_write_paths_override.clone(),
+@@ -146,6 +149,7 @@ fn retry_uses_original_unified_exec_request_and_stops_after_second_failure() {
+          codex_home,
+          read_roots_override,
+          read_roots_include_platform_defaults,
++         additional_read_roots,
+          write_roots_override,
+          deny_read_paths_override,
+          deny_write_paths_override,
+@@ -158,6 +162,7 @@ fn retry_uses_original_unified_exec_request_and_stops_after_second_failure() {
+                 codex_home: codex_home.to_path_buf(),
+                 read_roots_override: read_roots_override.map(<[PathBuf]>::to_vec),
+                 read_roots_include_platform_defaults,
++                additional_read_roots: additional_read_roots.to_vec(),
+                 write_roots_override: write_roots_override.map(<[PathBuf]>::to_vec),
+                 deny_read_paths_override: deny_read_paths_override.to_vec(),
+                 deny_write_paths_override: deny_write_paths_override.to_vec(),
+@@ -247,7 +252,7 @@ fn unified_exec_logon_1056_retries_original_request_and_runs_command_once() {
+                 .current_dir(&spawn_request.cwd)
+                 .status()?)
+         },
+-        |_, _, _, _, _, _, _, _, _, _, _| panic!("1056 must never refresh credentials"),
++        |_, _, _, _, _, _, _, _, _, _, _, _| panic!("1056 must never refresh credentials"),
+     )
+     .expect("unified exec should recover from runner logon 1056");
+     assert!(status.success());
+diff --git a/codex-rs/windows-sandbox-rs/src/unified_exec/mod.rs b/codex-rs/windows-sandbox-rs/src/unified_exec/mod.rs
+index 4f8b43ecdd..a1ccc36788 100644
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/mod.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/mod.rs
+@@ -39,6 +39,7 @@ pub struct WindowsSandboxSessionRequest<'a> {
+     pub timeout_ms: Option<u64>,
+     pub read_roots_override: Option<&'a [PathBuf]>,
+     pub read_roots_include_platform_defaults: bool,
++    pub additional_read_roots: &'a [PathBuf],
+     pub write_roots_override: Option<&'a [PathBuf]>,
+     pub deny_read_paths_override: &'a [AbsolutePathBuf],
+     pub deny_write_paths_override: &'a [AbsolutePathBuf],
+@@ -70,6 +71,7 @@ pub(crate) async fn spawn_windows_sandbox_session_with_desktop(
+             request.timeout_ms,
+             request.read_roots_override,
+             request.read_roots_include_platform_defaults,
++            request.additional_read_roots,
+             request.write_roots_override,
+             request.deny_read_paths_override,
+             request.deny_write_paths_override,
+@@ -147,6 +149,7 @@ pub async fn spawn_windows_sandbox_session_elevated_for_permission_profile(
+     timeout_ms: Option<u64>,
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[AbsolutePathBuf],
+     deny_write_paths_override: &[AbsolutePathBuf],
+@@ -166,6 +169,7 @@ pub async fn spawn_windows_sandbox_session_elevated_for_permission_profile(
+         timeout_ms,
+         read_roots_override,
+         read_roots_include_platform_defaults,
++        additional_read_roots,
+         write_roots_override,
+         deny_read_paths_override,
+         deny_write_paths_override,
+diff --git a/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs b/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs
+index be2d1bf07c..9617118c38 100644
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/tests.rs
+@@ -247,6 +247,7 @@ fn restricted_token_rejects_managed_network_before_spawn() {
+             timeout_ms: None,
+             read_roots_override: None,
+             read_roots_include_platform_defaults: false,
++            additional_read_roots: &[],
+             write_roots_override: None,
+             deny_read_paths_override: &[],
+             deny_write_paths_override: &[],
+@@ -332,6 +333,7 @@ fn elevated_non_tty_cmd_forwards_env_output_and_exit() {
+             Some(5_000),
+             /*read_roots_override*/ None,
+             /*read_roots_include_platform_defaults*/ true,
++            /*additional_read_roots*/ &[],
+             /*write_roots_override*/ None,
+             &[],
+             &[],
+@@ -387,6 +389,7 @@ fn registered_non_tty_cmd_forwards_env_output_and_exit() {
+             Some(5_000),
+             /*read_roots_override*/ None,
+             /*read_roots_include_platform_defaults*/ true,
++            /*additional_read_roots*/ &[],
+             /*write_roots_override*/ None,
+             &[],
+             &[],
+diff --git a/codex-rs/windows-sandbox-rs/src/wrapper.rs b/codex-rs/windows-sandbox-rs/src/wrapper.rs
+index c449505f45..d24e9a38d0 100644
+--- a/codex-rs/windows-sandbox-rs/src/wrapper.rs
++++ b/codex-rs/windows-sandbox-rs/src/wrapper.rs
+@@ -34,6 +34,7 @@ pub const CODEX_WINDOWS_SANDBOX_ARG1: &str = "--run-as-windows-sandbox";
+ 
+ const COMMAND_CWD_FLAG: &str = "--command-cwd";
+ const CODEX_HOME_FLAG: &str = "--codex-home";
++const ADDITIONAL_READ_ROOTS_JSON_FLAG: &str = "--additional-read-roots-json";
+ const DENY_READ_PATHS_JSON_FLAG: &str = "--deny-read-paths-json";
+ const DENY_WRITE_PATHS_JSON_FLAG: &str = "--deny-write-paths-json";
+ const ENV_JSON_FLAG: &str = "--env-json";
+@@ -61,6 +62,7 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
+     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
+     read_roots_override: Option<&[PathBuf]>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: &[PathBuf],
+     write_roots_override: Option<&[PathBuf]>,
+     deny_read_paths_override: &[AbsolutePathBuf],
+     deny_write_paths_override: &[AbsolutePathBuf],
+@@ -224,6 +226,13 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
+     if read_roots_include_platform_defaults {
+         args.push(READ_ROOTS_INCLUDE_PLATFORM_DEFAULTS_FLAG.to_string());
+     }
++    if !additional_read_roots.is_empty() {
++        push_json_arg(
++            &mut args,
++            ADDITIONAL_READ_ROOTS_JSON_FLAG,
++            &additional_read_roots,
++        );
++    }
+     if let Some(write_roots_override) = write_roots_override {
+         push_json_arg(&mut args, WRITE_ROOTS_JSON_FLAG, &write_roots_override);
+     }
+@@ -308,6 +317,7 @@ struct WindowsSandboxWrapperRequest {
+     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
+     read_roots_override: Option<Vec<PathBuf>>,
+     read_roots_include_platform_defaults: bool,
++    additional_read_roots: Vec<PathBuf>,
+     write_roots_override: Option<Vec<PathBuf>>,
+     deny_read_paths_override: Vec<AbsolutePathBuf>,
+     deny_write_paths_override: Vec<AbsolutePathBuf>,
+@@ -333,6 +343,7 @@ async fn run_windows_sandbox_wrapper_request(request: WindowsSandboxWrapperReque
+             timeout_ms: None,
+             read_roots_override: request.read_roots_override.as_deref(),
+             read_roots_include_platform_defaults: request.read_roots_include_platform_defaults,
++            additional_read_roots: request.additional_read_roots.as_slice(),
+             write_roots_override: request.write_roots_override.as_deref(),
+             deny_read_paths_override: request.deny_read_paths_override.as_slice(),
+             deny_write_paths_override: request.deny_write_paths_override.as_slice(),
+@@ -360,6 +371,7 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
+     let mut proxy_settings_mode = crate::WindowsSandboxProxySettingsMode::Reconcile;
+     let mut read_roots_override = None;
+     let mut read_roots_include_platform_defaults = false;
++    let mut additional_read_roots = Vec::new();
+     let mut write_roots_override = None;
+     let mut deny_read_paths_override = Vec::new();
+     let mut deny_write_paths_override = Vec::new();
+@@ -413,6 +425,9 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
+                 read_roots_override =
+                     Some(json_flag_value(next_flag_value(&mut args, &arg)?, &arg)?);
+             }
++            ADDITIONAL_READ_ROOTS_JSON_FLAG => {
++                additional_read_roots = json_flag_value(next_flag_value(&mut args, &arg)?, &arg)?;
++            }
+             WRITE_ROOTS_JSON_FLAG => {
+                 write_roots_override =
+                     Some(json_flag_value(next_flag_value(&mut args, &arg)?, &arg)?);
+@@ -453,6 +468,7 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
+         proxy_settings_mode,
+         read_roots_override,
+         read_roots_include_platform_defaults,
++        additional_read_roots,
+         write_roots_override,
+         deny_read_paths_override,
+         deny_write_paths_override,
+diff --git a/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs b/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs
+index e68299e068..f68747351d 100644
+--- a/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/wrapper_tests.rs
+@@ -7,6 +7,7 @@ use codex_protocol::models::PermissionProfile;
+ use codex_utils_absolute_path::AbsolutePathBuf;
+ use pretty_assertions::assert_eq;
+ 
++use super::ADDITIONAL_READ_ROOTS_JSON_FLAG;
+ use super::CODEX_HOME_FLAG;
+ use super::CODEX_WINDOWS_SANDBOX_ARG1;
+ use super::COMMAND_CWD_FLAG;
+@@ -56,6 +57,7 @@ fn large_deny_list_uses_environment_without_changing_the_request() {
+         crate::WindowsSandboxProxySettingsMode::Preserve,
+         /*read_roots_override*/ None,
+         /*read_roots_include_platform_defaults*/ true,
++        /*additional_read_roots*/ &[],
+         /*write_roots_override*/ None,
+         &paths,
+         &paths,
+@@ -104,6 +106,7 @@ fn windows_wrapper_args_round_trip() {
+     let mut env = HashMap::from([("Path".to_string(), r"C:\Windows\System32".to_string())]);
+     let permission_profile = PermissionProfile::read_only();
+     let read_roots_override = vec![PathBuf::from(r"C:\read")];
++    let additional_read_roots = vec![PathBuf::from(r"C:\Users\me\AppData\Local\Programs\niu")];
+     let write_roots_override = vec![PathBuf::from(r"C:\write")];
+     let deny_read_paths_override = vec![
+         AbsolutePathBuf::from_absolute_path(Path::new(r"C:\blocked-read"))
+@@ -129,6 +132,7 @@ fn windows_wrapper_args_round_trip() {
+         crate::WindowsSandboxProxySettingsMode::Preserve,
+         Some(read_roots_override.as_slice()),
+         /*read_roots_include_platform_defaults*/ true,
++        additional_read_roots.as_slice(),
+         Some(write_roots_override.as_slice()),
+         deny_read_paths_override.as_slice(),
+         deny_write_paths_override.as_slice(),
+@@ -148,6 +152,7 @@ fn windows_wrapper_args_round_trip() {
+     assert!(args.contains(&PRESERVE_PROXY_SETTINGS_FLAG.to_string()));
+     assert!(args.contains(&READ_ROOTS_JSON_FLAG.to_string()));
+     assert!(args.contains(&READ_ROOTS_INCLUDE_PLATFORM_DEFAULTS_FLAG.to_string()));
++    assert!(args.contains(&ADDITIONAL_READ_ROOTS_JSON_FLAG.to_string()));
+     assert!(args.contains(&WRITE_ROOTS_JSON_FLAG.to_string()));
+     assert!(args.contains(&DENY_READ_PATHS_JSON_FLAG.to_string()));
+     assert!(args.contains(&DENY_WRITE_PATHS_JSON_FLAG.to_string()));
+@@ -181,6 +186,7 @@ fn windows_wrapper_args_round_trip() {
+     );
+     assert_eq!(parsed.read_roots_override, Some(read_roots_override));
+     assert_eq!(parsed.read_roots_include_platform_defaults, true);
++    assert_eq!(parsed.additional_read_roots, additional_read_roots);
+     assert_eq!(parsed.write_roots_override, Some(write_roots_override));
+     assert_eq!(parsed.deny_read_paths_override, deny_read_paths_override);
+     assert_eq!(parsed.deny_write_paths_override, deny_write_paths_override);
