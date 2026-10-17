@@ -101,8 +101,14 @@ cmd_rebase() {
 cmd_export() {
   mkdir -p "$PATCH_DIR"
   rm -f "$PATCH_DIR"/*.patch
+  # Exclude patches/ from the series. It is metadata *about* the delta, not part
+  # of it: including it makes the series self-referential (the commit that writes
+  # these files is itself one of them, so the last file can never be reproduced)
+  # and `check` can then only ever report a three-way merge rather than an exact
+  # apply. Regenerate it locally with `export`/`pin` after applying the series.
   git format-patch --no-signature --zero-commit \
-    --output-directory "$PATCH_DIR" "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH..HEAD" >/dev/null
+    --output-directory "$PATCH_DIR" "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH..HEAD" \
+    -- . ':(exclude)patches' >/dev/null
   echo "wrote $(ls "$PATCH_DIR"/*.patch | wc -l) patch(es) to $PATCH_DIR"
   ls -1 "$PATCH_DIR"
 }
