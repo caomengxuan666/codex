@@ -356,7 +356,7 @@ impl ShellSnapshotCache {
             ShellType::Bash => ("-pc", "set +o privileged\n"),
             ShellType::Zsh => ("-fc", "setopt RCS\n"),
             ShellType::Sh => ("-c", ""),
-            ShellType::PowerShell | ShellType::Cmd => unreachable!(),
+            ShellType::PowerShell | ShellType::Cmd | ShellType::Niu => unreachable!(),
         };
         prepared.command[shell_start + 1] = shell_flag.to_string();
         prepared.command[shell_start + 2] = if protected {

@@ -112,6 +112,11 @@ pub fn extract_bash_command(command: &[String]) -> Option<(&str, &str)> {
         Some(ShellType::Zsh | ShellType::Bash | ShellType::Sh) => {
             matches!(flag.as_str(), "-lc" | "-c")
         }
+        // NiuBash exposes -C for profile-aware runs and -c for plain runs, not
+        // bash/zsh-style -lc. Accepting a flag NiuBash rejects would let that
+        // script pass through unextracted and therefore uninspected, so keep
+        // this set in step with the shell: add "-lc" only once NiuBash supports
+        // it (codex-rs/docs/niu-first-class-shell-plan.md).
         Some(ShellType::Niu) => matches!(flag.as_str(), "-C" | "--repl-command" | "-c"),
         _ => false,
     };
@@ -536,6 +541,30 @@ mod tests {
                 parsed,
                 vec![vec!["git".to_string(), "status".to_string()]],
                 "{flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn niu_wrapper_flags_match_the_shell_it_wraps() {
+        // Security boundary: a wrapper flag NiuBash does not support must not be
+        // treated as a shell wrapper, because the inner script would then skip
+        // command parsing and inspection entirely. NiuBash exposes -C and -c
+        // (plus --repl-command for REPL calls) and deliberately has no -lc.
+        for flag in ["-C", "-c", "--repl-command"] {
+            let command = vec!["niu".to_string(), flag.to_string(), "ls".to_string()];
+            assert_eq!(
+                extract_bash_command(&command),
+                Some(("niu", "ls")),
+                "{flag} must extract the wrapped script"
+            );
+        }
+        for flag in ["-lc", "-l", "-i", "--login"] {
+            let command = vec!["niu".to_string(), flag.to_string(), "ls".to_string()];
+            assert_eq!(
+                extract_bash_command(&command),
+                None,
+                "{flag} is not a NiuBash wrapper flag and must not be treated as one"
             );
         }
     }

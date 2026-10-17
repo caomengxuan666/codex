@@ -34,7 +34,7 @@ pub(super) fn materialize(shell: ShellType, state: &str) -> io::Result<File> {
         ShellType::Zsh => format!(
             "__codex_snapshot_fd={fd}\nexec {{__codex_snapshot_fd}}<&-\nunset __codex_snapshot_fd\n"
         ),
-        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd => {
+        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd | ShellType::Niu => {
             return Err(io::Error::other("unsupported snapshot shell"));
         }
     };
