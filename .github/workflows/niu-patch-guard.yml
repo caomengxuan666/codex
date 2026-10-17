@@ -11,6 +11,12 @@ name: niu-patch-guard
 #
 # The job does not build the release binary (that takes hours); it proves the
 # patch series still applies and that the touched crate still compiles.
+#
+# This file is registered on the default branch so `workflow_dispatch` can
+# resolve it by name, but the fork delta itself (scripts/niu/, patches/niu/,
+# the shell-command changes) lives on the fork's feature branch. On a ref that
+# carries no delta the guard has nothing to verify, so it says so and stops
+# instead of failing on a missing script.
 
 on:
   schedule:
@@ -38,7 +44,31 @@ jobs:
           # Full history: the guard needs the merge base with upstream.
           fetch-depth: 0
 
+      # Preflight so a ref that carries no delta does not spend time fetching
+      # upstream or compiling crates. `workflow_dispatch` from the default
+      # branch lands here.
+      - name: Check for the fork delta
+        id: delta
+        run: |
+          set -euo pipefail
+          if [ -f scripts/niu/sync-upstream.sh ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### niu patch guard skipped"
+            echo
+            echo "\`scripts/niu/sync-upstream.sh\` is not present on \`${GITHUB_REF_NAME}\`,"
+            echo "so this ref carries no fork delta and there is nothing to guard."
+            echo
+            echo "The workflow is registered on the default branch only so that"
+            echo "\`workflow_dispatch\` can resolve it by name. Dispatch it from the"
+            echo "fork branch that holds the delta to run the guard for real."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Add upstream and fetch main
+        if: steps.delta.outputs.present == 'true'
         run: |
           set -euo pipefail
           git remote add upstream https://github.com/openai/codex.git
@@ -46,20 +76,26 @@ jobs:
           git fetch --no-tags upstream main
 
       - name: Report drift
+        if: steps.delta.outputs.present == 'true'
         run: scripts/niu/sync-upstream.sh drift || true
 
       - name: Export the fork delta as patches
+        if: steps.delta.outputs.present == 'true'
         run: scripts/niu/sync-upstream.sh export
 
       - name: Apply the patches to a pristine upstream checkout
+        if: steps.delta.outputs.present == 'true'
         run: scripts/niu/sync-upstream.sh check
 
       - name: Record the upstream pin
+        if: steps.delta.outputs.present == 'true'
         run: scripts/niu/sync-upstream.sh pin
 
-      - uses: dtolnay/rust-toolchain@stable
+      - if: steps.delta.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/cache@v4
+      - if: steps.delta.outputs.present == 'true'
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -69,10 +105,12 @@ jobs:
           restore-keys: niu-guard-
 
       - name: Compile the crates the delta touches
+        if: steps.delta.outputs.present == 'true'
         working-directory: codex-rs
         run: cargo check -p codex-shell-command -p codex-sandboxing
 
       - name: Upload the exported patch series
+        if: steps.delta.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: niu-patches

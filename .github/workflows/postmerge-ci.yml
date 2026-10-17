@@ -6,6 +6,21 @@ on:
   push:
     branches: [main]
 
+# The called v8-canary workflow's `build` job requests `actions: read` (it
+# downloads its own artifacts). GitHub validates a nested job's requests against
+# what the caller grants, and this repository's default workflow token is
+# read-only (`contents: read`, everything else `none`), so the reusable-workflow
+# call never started and the whole run was a startup failure:
+#
+#   The nested job 'build' is requesting 'actions: read',
+#   but is only allowed 'actions: none'.
+#
+# Grant it here. Upstream does not need this block because openai/codex's
+# repository default already allows `actions: read`.
+permissions:
+  actions: read
+  contents: read
+
 jobs:
   # Keep reusable workflow calls alphabetized. Each child retains its own
   # workflow_dispatch trigger so maintainers can rerun flaky suites directly.
