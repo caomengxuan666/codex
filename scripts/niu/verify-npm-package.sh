@@ -114,7 +114,7 @@ PLATFORM_TGZ="$(ls "$WORK_DIR"/cmx666-codex-*-"$PLATFORM_TAG".tgz | head -1)"
 (cd "$PROJ" && npm install --omit=optional --no-audit --no-fund "$META_TGZ")
 ALIAS_DIR="$PROJ/node_modules/@cmx666/codex-$PLATFORM_TAG"
 rm -rf "$ALIAS_DIR"; mkdir -p "$ALIAS_DIR"
-tar -xzf "$PLATFORM_TGZ" --strip-components=1 -C "$ALIAS_DIR"
+tar -xzf "$PLATFORM_TGZ" --strip-components=1 --force-local -C "$ALIAS_DIR"
 echo "  meta package   : $PROJ/node_modules/@cmx666/codex"
 echo "  platform alias : $ALIAS_DIR ($(find "$ALIAS_DIR" -type f | wc -l) files)"
 echo "  resolved by the launcher:"
