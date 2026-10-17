@@ -86,19 +86,20 @@ jobs:
           restore-keys: |
             cargo-home-windows-x64-
 
-      # Cache the compiled dependency artifacts directly. An earlier version
-      # wrapped rustc with sccache instead and was measurably worse: sccache
-      # hashes the whole thin-LTO input set and stores the ~300 MB codex-cli
-      # output, and that overhead lands on the longest single step. Measured
-      # 2026-10-17: 115+ minutes and still unfinished against 68 minutes without
-      # the wrapper. Do not reintroduce it without new measurements.
+      # Cache the compiled dependency artifacts directly. Read the two exclusions
+      # before adding paths:
       #
-      # What this can buy is bounded by where the time actually goes. In the
-      # unwrapped 68-minute build, ~725 small dependency crates compiled in the
-      # first seven minutes and the final 31 minutes produced no new crate at all
-      # -- that tail is the first-party crates plus the thin-LTO link, which
-      # change every commit and cannot be cached. Expect the dependency portion
-      # back, not the hour.
+      # - Do NOT cache target/release/build. Restoring a build script's OUT_DIR
+      #   alongside a fresh checkout left the v8 crate unable to find its
+      #   `rusty_v8` static library, and the whole build died at the link
+      #   (run 39022901124). Build scripts are cheap; let them re-run.
+      # - Do NOT wrap rustc with sccache. It was measurably worse: sccache hashes
+      #   the whole thin-LTO input set and stores the ~300 MB codex-cli output,
+      #   so its overhead lands on the longest single step (measured 2026-10-17:
+      #   115+ minutes unfinished against 68 minutes without it).
+      #
+      # The key carries a version so a cache written by an earlier set of paths
+      # can never be restored.
       - name: Restore build cache
         id: build_cache_restore
         uses: actions/cache/restore@v4
@@ -106,10 +107,9 @@ jobs:
           path: |
             codex-rs/target/release/deps
             codex-rs/target/release/.fingerprint
-            codex-rs/target/release/build
-          key: build-windows-x64-${{ steps.cachekey.outputs.hash }}
+          key: build-windows-x64-v2-${{ steps.cachekey.outputs.hash }}
           restore-keys: |
-            build-windows-x64-
+            build-windows-x64-v2-
 
       - uses: actions/setup-node@v4
         with:
@@ -149,16 +149,27 @@ jobs:
       # rust-release-windows.yml. Three separate invocations re-unified features
       # per call, so shared crates were compiled two or three times (~10 min of
       # the old 68-minute build step).
+      # Three separate invocations, deliberately. Merging them into one was tried
+      # and reverted: a single invocation unifies the feature sets of all three
+      # packages, so shared dependencies rebuild with the union of those features
+      # and the final codex-cli unit grows. Measured 2026-10-17: 82m07s merged
+      # against 68m for the three separate builds.
+      #
+      # Each invocation overwrites target/cargo-timings/cargo-timing.html, so keep
+      # a copy per invocation; the copies are uploaded for comparison.
       - name: Build the release binaries
         id: build
         working-directory: codex-rs
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --timings \
-            --package codex-cli --bin codex \
-            --package codex-windows-sandbox --bins \
-            --package codex-code-mode-host --bin codex-code-mode-host
+          timings=target/cargo-timings
+          cargo build --release --timings --package codex-cli --bin codex
+          cp "$timings/cargo-timing.html" "$timings/timings-1-codex-cli.html"
+          cargo build --release --timings --package codex-windows-sandbox --bins
+          cp "$timings/cargo-timing.html" "$timings/timings-2-sandbox.html"
+          cargo build --release --timings --package codex-code-mode-host --bin codex-code-mode-host
+          cp "$timings/cargo-timing.html" "$timings/timings-3-code-mode-host.html"
 
       # --timings writes the per-unit breakdown to
       # target/cargo-timings/cargo-timing.html. The repo's own release workflow
@@ -169,9 +180,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cargo-timings-niu-windows-x64
-          # cargo may write this under the target triple directory, so glob for
-          # it; upstream's rust-release.yml does the same.
-          path: codex-rs/target/**/cargo-timings/cargo-timing.html
+          # One copy per cargo invocation; cargo may write these under the target
+          # triple directory, so glob for it.
+          path: codex-rs/target/**/cargo-timings/*.html
           if-no-files-found: warn
 
       - name: Save cargo home cache
@@ -197,8 +208,7 @@ jobs:
           path: |
             codex-rs/target/release/deps
             codex-rs/target/release/.fingerprint
-            codex-rs/target/release/build
-          key: build-windows-x64-${{ steps.cachekey.outputs.hash }}
+          key: build-windows-x64-v2-${{ steps.cachekey.outputs.hash }}
 
       - name: Assemble the canonical package directory and the release zip
         id: assemble
